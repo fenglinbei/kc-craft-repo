@@ -133,8 +133,8 @@ class KGCRAFTPipeline:
     @staticmethod
     def _format_running_metrics_postfix(metrics: dict[str, Any], n: int) -> str:
         return (
-            f"running macro P/R/F1={metrics['macro_precision']:.4f}/"
-            f"{metrics['macro_recall']:.4f}/{metrics['macro_f1']:.4f} (n={n})"
+            f"P/R/F1={metrics['macro_precision']:.4f}/"
+            f"{metrics['macro_recall']:.4f}/{metrics['macro_f1']:.4f}, n={n}"
         )
 
     def _log_running_metrics(self, results: List[PipelineResult], sample_id: str, progress_bar: tqdm | None = None) -> None:
@@ -153,14 +153,14 @@ class KGCRAFTPipeline:
         running_postfix = self._format_running_metrics_postfix(metrics, n=len(y_true))
         if progress_bar is not None:
             progress_bar.set_postfix_str(running_postfix)
-        LOGGER.info(
-            "sample_id=%s classification finished. running macro P/R/F1 = %.4f / %.4f / %.4f (n=%d)",
-            sample_id,
-            metrics["macro_precision"],
-            metrics["macro_recall"],
-            metrics["macro_f1"],
-            len(y_true),
-        )
+        # LOGGER.info(
+        #     "sample_id=%s classification finished. running macro P/R/F1 = %.4f / %.4f / %.4f (n=%d)",
+        #     sample_id,
+        #     metrics["macro_precision"],
+        #     metrics["macro_recall"],
+        #     metrics["macro_f1"],
+        #     len(y_true),
+        # )
 
     def _log_final_metrics(self, results: List[PipelineResult]) -> None:
         y_true, y_pred = self._labeled_pairs(results)
@@ -264,11 +264,11 @@ class KGCRAFTPipeline:
             stage_bar.close()
 
         if mode == "naive_llm":
-            kg_bar = make_stage_bar("KG生成阶段（跳过）")
+            kg_bar = make_stage_bar("KG extract（skip）")
             close_stage_bar(kg_bar)
-            qa_bar = make_stage_bar("QA阶段（跳过）")
+            qa_bar = make_stage_bar("Contrastive QA（skip）")
             close_stage_bar(qa_bar)
-            classification_bar = make_stage_bar("分类阶段")
+            classification_bar = make_stage_bar("Classification")
             context = truncate_text(
                 join_reports(sample.reports),
                 self.config.pipeline.max_context_chars_for_verification,
@@ -292,7 +292,7 @@ class KGCRAFTPipeline:
 
         # Shared KG extraction for full / kg_only / llm_questions
         kg_total_steps = 1 + len(sample.reports)
-        kg_bar = make_stage_bar("KG生成阶段", total=kg_total_steps)
+        kg_bar = make_stage_bar("KG extract", total=kg_total_steps)
         claim_kg_out = self.kg_extractor.extract(sample.claim)
         advance_stage_bar(kg_bar)
         report_kgs_out = []
@@ -317,9 +317,9 @@ class KGCRAFTPipeline:
         close_stage_bar(kg_bar)
 
         if mode == "kg_only":
-            qa_bar = make_stage_bar("QA阶段（跳过）")
+            qa_bar = make_stage_bar("Contrastive QA（skip）")
             close_stage_bar(qa_bar)
-            classification_bar = make_stage_bar("分类阶段")
+            classification_bar = make_stage_bar("Classification")
             result.prediction = verify_with_kg_only(
                 client=self.reasoning_client,
                 claim=sample.claim,
@@ -361,7 +361,7 @@ class KGCRAFTPipeline:
             raise ValueError(f"Unsupported mode: {mode!r}")
 
         qa_total_steps = max(1, len(selected_questions))
-        qa_bar = make_stage_bar("QA阶段", total=qa_total_steps)
+        qa_bar = make_stage_bar("Contrastive QA", total=qa_total_steps)
         qa_pairs = answer_questions(
             client=self.reasoning_client,
             claim=sample.claim,
@@ -377,7 +377,7 @@ class KGCRAFTPipeline:
         )
         close_stage_bar(qa_bar)
 
-        classification_bar = make_stage_bar("分类阶段")
+        classification_bar = make_stage_bar("Classification")
         prediction = verify_claim(
             client=self.reasoning_client,
             claim=sample.claim,
