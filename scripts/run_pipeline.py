@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
@@ -13,6 +14,7 @@ if str(SRC) not in sys.path:
 from kg_craft.config import load_config
 from kg_craft.data import load_jsonl, rows_to_samples, save_results
 from kg_craft.pipeline import KGCRAFTPipeline
+from kg_craft.utils import setup_logging
 
 
 def parse_args() -> argparse.Namespace:
@@ -26,12 +28,20 @@ def parse_args() -> argparse.Namespace:
         choices=["full", "naive_llm", "kg_only", "llm_questions"],
         help="Pipeline mode override.",
     )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Logging level.",
+    )
     return parser.parse_args()
 
 
 
 def main() -> None:
     args = parse_args()
+    setup_logging(args.log_level)
+    logger = logging.getLogger(__name__)
     config = load_config(args.config)
 
     input_path = args.input or config.data.input_path
@@ -55,6 +65,7 @@ def main() -> None:
     pipeline = KGCRAFTPipeline(config)
     results = pipeline.run(samples, mode=mode)
     save_results(output_path, results)
+    logger.info("Saved %d results to %s", len(results), output_path)
     print(f"Saved {len(results)} results to {output_path}")
 
 
