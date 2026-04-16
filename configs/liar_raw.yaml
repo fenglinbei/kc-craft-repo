@@ -1,0 +1,17 @@
+extends: base.yaml
+
+verification:
+  labels:
+    - "pants-fire"
+    - "false"
+    - "barely-true"
+    - "half-true"
+    - "mostly-true"
+    - "true"
+  label_descriptions:
+    "pants-fire": completely false or absurd
+    "false": factually false
+    "barely-true": contains a small amount of truth but is mostly false
+    "half-true": partially true and partially false or missing important context
+    "mostly-true": largely true with minor inaccuracies or omissions
+    "true": factually true according to the provided evidence

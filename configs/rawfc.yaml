@@ -1,0 +1,11 @@
+extends: base.yaml
+
+verification:
+  labels:
+    - "false"
+    - "half"
+    - "true"
+  label_descriptions:
+    "false": factually false according to the provided evidence
+    "half": partially true or mixed according to the provided evidence
+    "true": factually true according to the provided evidence

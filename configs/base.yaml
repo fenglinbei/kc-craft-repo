@@ -1,0 +1,71 @@
+run:
+  mode: full
+  seed: 42
+  limit: null
+  verbose: true
+
+data:
+  input_path: ./data/example_input.jsonl
+  output_path: ./outputs/predictions.jsonl
+  id_field: id
+  claim_field: claim
+  reports_field: reports
+  label_field: label
+
+cache:
+  enabled: true
+  cache_dir: ./cache
+
+models:
+  kg_llm:
+    api_key: ${KG_API_KEY}
+    api_base: ${KG_API_BASE}
+    model: ${KG_MODEL}
+    timeout: 120
+    temperature: 0.0
+    max_tokens: 2048
+    top_p: 1.0
+    max_retries: 3
+    retry_wait_seconds: 2.0
+    headers: {}
+    response_format:
+      type: json_object
+    extra_body: {}
+
+  reasoning_llm:
+    api_key: ${REASONING_API_KEY}
+    api_base: ${REASONING_API_BASE}
+    model: ${REASONING_MODEL}
+    timeout: 120
+    temperature: 0.0
+    max_tokens: 2048
+    top_p: 1.0
+    max_retries: 3
+    retry_wait_seconds: 2.0
+    headers: {}
+    response_format: null
+    extra_body: {}
+
+embedding:
+  model_path: ./models/Qwen3-Embedding-0.6B
+  device: cpu
+  batch_size: 32
+  normalize: true
+
+pipeline:
+  max_contrastive_questions: 5
+  mmr_lambda: 1.0
+  max_context_chars_for_answers: 24000
+  max_context_chars_for_verification: 20000
+  deduplicate_questions: true
+  save_raw_api_responses: true
+  merge_entity_strategy: normalized_name
+  question_generation_mode: kg
+
+verification:
+  labels: []
+  label_descriptions: {}
+
+prompts:
+  use_operationalized_kg_prompt: true
+  llm_question_examples: []
