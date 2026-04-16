@@ -18,6 +18,7 @@ from .contrastive import (
     summarize_qa_pairs,
 )
 from .embeddings import LocalSentenceEmbedder
+from .evaluation import compute_metrics
 from .kg_extraction import KGExtractor, merge_kgs, triples_from_claim_in_merged_graph
 from .prompts import format_kg_as_text
 from .schemas import PipelineResult, Sample
@@ -80,7 +81,9 @@ class KGCRAFTPipeline:
             if show_overall_progress:
                 iterator = tqdm(scoped_samples, desc=f"KG-CRAFT ({mode})", unit="sample")
             for sample in iterator:
-                results.append(self.run_one(sample, mode=mode))
+                result = self.run_one(sample, mode=mode)
+                results.append(result)
+                self._log_running_metrics(results, sample_id=sample.sample_id)
         else:
             indexed_results: list[tuple[int, PipelineResult]] = []
             with ThreadPoolExecutor(max_workers=num_workers) as executor:
@@ -93,10 +96,81 @@ class KGCRAFTPipeline:
                     iterator = tqdm(iterator, total=total_samples, desc=f"KG-CRAFT ({mode})", unit="sample")
                 for future in iterator:
                     idx = futures[future]
-                    indexed_results.append((idx, future.result()))
+                    result = future.result()
+                    indexed_results.append((idx, result))
+                    self._log_running_metrics([x[1] for x in indexed_results], sample_id=result.sample_id)
             results = [result for _, result in sorted(indexed_results, key=lambda item: item[0])]
+        self._log_final_metrics(results)
         LOGGER.info("Pipeline finished. mode=%s, results=%d", mode, len(results))
         return results
+
+    @staticmethod
+    def _labeled_pairs(results: List[PipelineResult]) -> tuple[list[str], list[str]]:
+        y_true: list[str] = []
+        y_pred: list[str] = []
+        for result in results:
+            if result.label is None:
+                continue
+            gold = str(result.label).strip()
+            pred = str(result.prediction).strip()
+            if not gold or not pred:
+                continue
+            y_true.append(gold)
+            y_pred.append(pred)
+        return y_true, y_pred
+
+    def _log_running_metrics(self, results: List[PipelineResult], sample_id: str) -> None:
+        y_true, y_pred = self._labeled_pairs(results)
+        if not y_true:
+            LOGGER.info(
+                "sample_id=%s classification finished. P/R/F1 unavailable (missing labels or predictions).",
+                sample_id,
+            )
+            return
+        metrics = compute_metrics(y_true, y_pred)
+        LOGGER.info(
+            "sample_id=%s classification finished. running macro P/R/F1 = %.4f / %.4f / %.4f (n=%d)",
+            sample_id,
+            metrics["macro_precision"],
+            metrics["macro_recall"],
+            metrics["macro_f1"],
+            len(y_true),
+        )
+
+    def _log_final_metrics(self, results: List[PipelineResult]) -> None:
+        y_true, y_pred = self._labeled_pairs(results)
+        if not y_true:
+            LOGGER.info("Final metrics unavailable (missing labels or predictions).")
+            return
+
+        metrics = compute_metrics(y_true, y_pred)
+        report = metrics["classification_report"]
+        LOGGER.info(
+            "Final macro P/R/F1 = %.4f / %.4f / %.4f (accuracy=%.4f, n=%d)",
+            metrics["macro_precision"],
+            metrics["macro_recall"],
+            metrics["macro_f1"],
+            metrics["accuracy"],
+            len(y_true),
+        )
+        for label, values in report.items():
+            if label in {"accuracy", "macro avg", "weighted avg"}:
+                continue
+            LOGGER.info(
+                "Final per-class %s: P/R/F1 = %.4f / %.4f / %.4f (support=%s)",
+                label,
+                values.get("precision", 0.0),
+                values.get("recall", 0.0),
+                values.get("f1-score", 0.0),
+                values.get("support", 0),
+            )
+        macro_values = report.get("macro avg", {})
+        LOGGER.info(
+            "Final report macro avg: P/R/F1 = %.4f / %.4f / %.4f",
+            macro_values.get("precision", 0.0),
+            macro_values.get("recall", 0.0),
+            macro_values.get("f1-score", 0.0),
+        )
 
     def run_one(self, sample: Sample, mode: str | None = None) -> PipelineResult:
         mode = mode or self.config.run.mode
@@ -120,20 +194,26 @@ class KGCRAFTPipeline:
             and self.config.run.num_workers == 1
         )
 
-        def make_stage_bar(stage_name: str) -> tqdm | None:
+        def make_stage_bar(stage_name: str, total: int = 1) -> tqdm | None:
             if not show_stage_progress:
                 return None
             return tqdm(
-                total=1,
+                total=max(1, total),
                 desc=f"sample={sample.sample_id} | {stage_name}",
-                unit="stage",
+                unit="step",
                 leave=False,
             )
 
-        def close_stage_bar(stage_bar: tqdm | None) -> None:
+        def advance_stage_bar(stage_bar: tqdm | None, step: int = 1) -> None:
             if stage_bar is None:
                 return
-            stage_bar.update(1)
+            stage_bar.update(step)
+
+        def close_stage_bar(stage_bar: tqdm | None, ensure_complete: bool = True) -> None:
+            if stage_bar is None:
+                return
+            if ensure_complete and stage_bar.total is not None and stage_bar.n < stage_bar.total:
+                stage_bar.update(stage_bar.total - stage_bar.n)
             stage_bar.close()
 
         if mode == "naive_llm":
@@ -164,9 +244,14 @@ class KGCRAFTPipeline:
             return result
 
         # Shared KG extraction for full / kg_only / llm_questions
-        kg_bar = make_stage_bar("KG生成阶段")
+        kg_total_steps = 1 + len(sample.reports)
+        kg_bar = make_stage_bar("KG生成阶段", total=kg_total_steps)
         claim_kg_out = self.kg_extractor.extract(sample.claim)
-        report_kgs_out = [self.kg_extractor.extract(report) for report in sample.reports]
+        advance_stage_bar(kg_bar)
+        report_kgs_out = []
+        for report in sample.reports:
+            report_kgs_out.append(self.kg_extractor.extract(report))
+            advance_stage_bar(kg_bar)
         merged_kg = merge_kgs([claim_kg_out.kg] + [x.kg for x in report_kgs_out])
         claim_triples = triples_from_claim_in_merged_graph(claim_kg_out.kg, merged_kg)
         kg_text = format_kg_as_text(
@@ -228,13 +313,15 @@ class KGCRAFTPipeline:
         else:
             raise ValueError(f"Unsupported mode: {mode!r}")
 
-        qa_bar = make_stage_bar("QA阶段")
+        qa_total_steps = max(1, len(selected_questions))
+        qa_bar = make_stage_bar("QA阶段", total=qa_total_steps)
         qa_pairs = answer_questions(
             client=self.reasoning_client,
             claim=sample.claim,
             reports=sample.reports,
             questions=selected_questions,
             max_context_chars=self.config.pipeline.max_context_chars_for_answers,
+            progress_callback=lambda: advance_stage_bar(qa_bar),
         )
         summary = summarize_qa_pairs(
             client=self.reasoning_client,

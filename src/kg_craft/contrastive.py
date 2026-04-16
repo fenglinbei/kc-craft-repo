@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Sequence
+from typing import Callable, Dict, List, Sequence
 
 import numpy as np
 
@@ -98,6 +98,7 @@ def answer_questions(
     reports: List[str],
     questions: Sequence[str],
     max_context_chars: int,
+    progress_callback: Callable[[], None] | None = None,
 ) -> List[QAPair]:
     context = truncate_text(join_reports(reports), max_context_chars)
     qa_pairs: List[QAPair] = []
@@ -105,6 +106,8 @@ def answer_questions(
         prompt = build_contrastive_answer_prompt(context=context, claim=claim, question=question)
         response = client.chat(messages=[{"role": "user", "content": prompt}])
         qa_pairs.append(QAPair(question=question, answer=response.content.strip()))
+        if progress_callback is not None:
+            progress_callback()
     return qa_pairs
 
 
