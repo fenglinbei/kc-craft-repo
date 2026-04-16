@@ -120,6 +120,32 @@ export REASONING_MODEL="gpt-4o"
 
 ---
 
+
+### 4.1 本地离线 vLLM 模式（可选）
+
+项目已支持 `backend: local_vllm`，会在进程内直接加载 vLLM，并在 `batch_size > 1` 时通过 `LLM.generate([prompt1, prompt2, ...], sampling_params)` 做批量推理加速。
+
+可直接使用示例配置：`configs/vllm_local_gemma4.yaml`（默认模型路径 `/data/models/gemma-4-31B-it`）。
+
+```bash
+# 需要先 conda activate vllm-gemma4
+unset LD_PRELOAD
+export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+export TOKENIZERS_PARALLELISM=false
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
+unset NCCL_ALGO NCCL_PROTO
+export NCCL_CUMEM_HOST_ENABLE=0
+export NCCL_P2P_LEVEL=LOC
+
+python scripts/run_pipeline.py \
+  --config configs/vllm_local_gemma4.yaml \
+  --mode full \
+  --input data/example_input.jsonl \
+  --output outputs/example_vllm_local.jsonl
+```
+
+> 注：`local_vllm` 模式下不走 HTTP `/chat/completions`，而是本地离线推理；`response_format` 会被忽略（文本输出）。
+
 ## 5. 运行
 
 ### 5.1 完整 KG-CRAFT
