@@ -5,6 +5,7 @@ import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -13,6 +14,8 @@ from .config import CacheConfig, LLMConfig
 from .utils import ensure_dir, stable_hash
 
 LOGGER = logging.getLogger(__name__)
+_LOCAL_VLLM_ENGINE_LOCK = Lock()
+_LOCAL_VLLM_ENGINE_REGISTRY: dict[tuple[Any, ...], dict[str, Any]] = {}
 
 
 def _normalize_backend(value: str) -> str:
@@ -68,22 +71,46 @@ class OpenAICompatibleChatClient:
         if not model_path:
             raise ValueError("local_vllm backend requires local_model_path (or model) in config")
 
-        self._local_llm = LLM(
-            model=model_path,
-            tensor_parallel_size=max(1, int(self.cfg.local_tensor_parallel_size)),
-            dtype=self.cfg.local_dtype,
-            max_model_len=int(self.cfg.local_max_model_len),
-            gpu_memory_utilization=float(self.cfg.local_gpu_memory_utilization),
-            max_num_batched_tokens=int(self.cfg.local_max_num_batched_tokens),
-            max_num_seqs=int(self.cfg.local_max_num_seqs),
-            async_scheduling=bool(self.cfg.local_async_scheduling),
-            trust_remote_code=bool(self.cfg.local_trust_remote_code),
-        )
-        self._local_sampling_params_cls = SamplingParams
-        self._local_tokenizer = AutoTokenizer.from_pretrained(
+        engine_key = (
             model_path,
-            trust_remote_code=bool(self.cfg.local_trust_remote_code),
+            max(1, int(self.cfg.local_tensor_parallel_size)),
+            self.cfg.local_dtype,
+            int(self.cfg.local_max_model_len),
+            float(self.cfg.local_gpu_memory_utilization),
+            int(self.cfg.local_max_num_batched_tokens),
+            int(self.cfg.local_max_num_seqs),
+            bool(self.cfg.local_async_scheduling),
+            bool(self.cfg.local_trust_remote_code),
         )
+        with _LOCAL_VLLM_ENGINE_LOCK:
+            shared_engine = _LOCAL_VLLM_ENGINE_REGISTRY.get(engine_key)
+            if shared_engine is None:
+                shared_engine = {
+                    "llm": LLM(
+                        model=model_path,
+                        tensor_parallel_size=max(1, int(self.cfg.local_tensor_parallel_size)),
+                        dtype=self.cfg.local_dtype,
+                        max_model_len=int(self.cfg.local_max_model_len),
+                        gpu_memory_utilization=float(self.cfg.local_gpu_memory_utilization),
+                        max_num_batched_tokens=int(self.cfg.local_max_num_batched_tokens),
+                        max_num_seqs=int(self.cfg.local_max_num_seqs),
+                        async_scheduling=bool(self.cfg.local_async_scheduling),
+                        trust_remote_code=bool(self.cfg.local_trust_remote_code),
+                    ),
+                    "sampling_params_cls": SamplingParams,
+                    "tokenizer": AutoTokenizer.from_pretrained(
+                        model_path,
+                        trust_remote_code=bool(self.cfg.local_trust_remote_code),
+                    ),
+                }
+                _LOCAL_VLLM_ENGINE_REGISTRY[engine_key] = shared_engine
+                LOGGER.info("Initialized new shared local_vllm engine for namespace=%s", self.namespace)
+            else:
+                LOGGER.info("Reusing shared local_vllm engine for namespace=%s", self.namespace)
+
+        self._local_llm = shared_engine["llm"]
+        self._local_sampling_params_cls = shared_engine["sampling_params_cls"]
+        self._local_tokenizer = shared_engine["tokenizer"]
 
     @staticmethod
     def _raw_from_content(content: str) -> Dict[str, Any]:
