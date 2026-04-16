@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +12,8 @@ import requests
 from .config import CacheConfig, LLMConfig
 from .utils import ensure_dir, stable_hash
 
+LOGGER = logging.getLogger(__name__)
+
 
 @dataclass
 class ChatResponse:
@@ -20,10 +23,23 @@ class ChatResponse:
 
 
 class OpenAICompatibleChatClient:
-    def __init__(self, cfg: LLMConfig, cache_cfg: Optional[CacheConfig] = None, namespace: str = "default"):
+    def __init__(
+        self,
+        cfg: LLMConfig,
+        cache_cfg: Optional[CacheConfig] = None,
+        namespace: str = "default",
+        debug: bool = False,
+        debug_preview_chars: int = 1200,
+        debug_head_chars: int = 450,
+        debug_tail_chars: int = 450,
+    ):
         self.cfg = cfg
         self.cache_cfg = cache_cfg or CacheConfig(enabled=False)
         self.namespace = namespace
+        self.debug = debug
+        self.debug_preview_chars = debug_preview_chars
+        self.debug_head_chars = debug_head_chars
+        self.debug_tail_chars = debug_tail_chars
         self.session = requests.Session()
         self.cache_dir = ensure_dir(Path(self.cache_cfg.cache_dir) / namespace) if self.cache_cfg.enabled else None
 
@@ -54,6 +70,52 @@ class OpenAICompatibleChatClient:
             return "\n".join(parts).strip()
         return str(message_content)
 
+    def _preview_text(self, text: str) -> str:
+        if self.debug_preview_chars <= 0 or len(text) <= self.debug_preview_chars:
+            return text
+        head_chars = max(1, self.debug_head_chars)
+        tail_chars = max(1, self.debug_tail_chars)
+        if head_chars + tail_chars >= len(text):
+            return text
+        omitted = len(text) - head_chars - tail_chars
+        return f"{text[:head_chars]}\n...<omitted {omitted} chars>...\n{text[-tail_chars:]}"
+
+    def _debug_log_request(self, payload: Dict[str, Any]) -> None:
+        if not self.debug:
+            return
+        messages = payload.get("messages", [])
+        LOGGER.debug(
+            "[debug][%s] request model=%s messages=%d max_tokens=%s temperature=%s",
+            self.namespace,
+            payload.get("model"),
+            len(messages),
+            payload.get("max_tokens"),
+            payload.get("temperature"),
+        )
+        for idx, message in enumerate(messages, start=1):
+            role = message.get("role", "unknown")
+            normalized_content = self._normalize_content(message.get("content", ""))
+            LOGGER.debug(
+                "[debug][%s] request.message[%d] role=%s chars=%d content=\n%s",
+                self.namespace,
+                idx,
+                role,
+                len(normalized_content),
+                self._preview_text(normalized_content),
+            )
+
+    def _debug_log_response(self, content: str, elapsed_seconds: float, cached: bool) -> None:
+        if not self.debug:
+            return
+        LOGGER.debug(
+            "[debug][%s] response cached=%s elapsed=%.3fs chars=%d content=\n%s",
+            self.namespace,
+            cached,
+            elapsed_seconds,
+            len(content),
+            self._preview_text(content),
+        )
+
     def chat(
         self,
         messages: List[Dict[str, Any]],
@@ -77,11 +139,14 @@ class OpenAICompatibleChatClient:
         if extra_body:
             payload.update(extra_body)
 
+        self._debug_log_request(payload)
+        started = time.perf_counter()
         if self.cache_cfg.enabled and self.cache_dir is not None:
             cache_path = self._cache_path(payload)
             if cache_path.exists():
                 raw = json.loads(cache_path.read_text(encoding="utf-8"))
                 content = self._extract_content(raw)
+                self._debug_log_response(content=content, elapsed_seconds=time.perf_counter() - started, cached=True)
                 return ChatResponse(content=content, raw=raw, cached=True)
 
         headers = {
@@ -105,6 +170,7 @@ class OpenAICompatibleChatClient:
                 content = self._extract_content(raw)
                 if self.cache_cfg.enabled and self.cache_dir is not None:
                     cache_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+                self._debug_log_response(content=content, elapsed_seconds=time.perf_counter() - started, cached=False)
                 return ChatResponse(content=content, raw=raw, cached=False)
             except Exception as exc:  # noqa: BLE001
                 last_error = exc

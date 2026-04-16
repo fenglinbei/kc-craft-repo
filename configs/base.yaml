@@ -3,6 +3,10 @@ run:
   seed: 42
   limit: null
   verbose: true
+  debug: false
+  debug_preview_chars: 1200
+  debug_head_chars: 450
+  debug_tail_chars: 450
 
 data:
   input_path: ./data/example_input.jsonl

@@ -125,10 +125,33 @@ export REASONING_MODEL="gpt-4o"
 ### 5.1 完整 KG-CRAFT
 
 ```bash
-。
+python scripts/run_pipeline.py \
+  --config configs/liar_raw.yaml \
+  --mode full \
+  --input data/example_input.jsonl \
+  --output outputs/example_full.jsonl
 ```
 
-### 5.2 Naive LLM baseline
+### 5.2 Debug 模式（查看每一步输入/输出与耗时）
+
+```bash
+python scripts/run_pipeline.py \
+  --config configs/liar_raw.yaml \
+  --mode full \
+  --input data/example_input.jsonl \
+  --output outputs/example_full_debug.jsonl \
+  --debug
+```
+
+开启后会输出：
+- 每次 API 调用的请求消息（按 `role` 展示）
+- 每次 API 调用的响应内容
+- 每次调用耗时与是否命中缓存
+- 每个样本总流程耗时
+
+当 prompt 或响应过长时，会自动保留首尾，中间显示省略段（可通过 `run.debug_preview_chars`、`run.debug_head_chars`、`run.debug_tail_chars` 调整）。
+
+### 5.3 Naive LLM baseline
 
 ```bash
 python scripts/run_pipeline.py \
@@ -138,7 +161,7 @@ python scripts/run_pipeline.py \
   --output outputs/example_naive.jsonl
 ```
 
-### 5.3 KG only ablation
+### 5.4 KG only ablation
 
 ```bash
 python scripts/run_pipeline.py \
@@ -148,7 +171,7 @@ python scripts/run_pipeline.py \
   --output outputs/example_kg_only.jsonl
 ```
 
-### 5.4 LLM question ablation
+### 5.5 LLM question ablation
 
 ```bash
 python scripts/run_pipeline.py \
@@ -158,7 +181,7 @@ python scripts/run_pipeline.py \
   --output outputs/example_llm_questions.jsonl
 ```
 
-### 5.5 将 LIAR-RAW / RAWFC 转换为本项目输入格式
+### 5.6 将 LIAR-RAW / RAWFC 转换为本项目输入格式
 
 把原始数据放到以下目录：
 

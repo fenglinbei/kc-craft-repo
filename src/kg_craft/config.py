@@ -68,6 +68,10 @@ class RunConfig:
     seed: int = 42
     limit: Optional[int] = None
     verbose: bool = True
+    debug: bool = False
+    debug_preview_chars: int = 1200
+    debug_head_chars: int = 450
+    debug_tail_chars: int = 450
 
 
 @dataclass
