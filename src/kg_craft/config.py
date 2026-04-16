@@ -5,6 +5,7 @@ import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
+import shlex
 from typing import Any, Dict, Optional
 
 import yaml
@@ -122,6 +123,37 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
     return result
 
 
+def _load_dotenv(path: Path) -> None:
+    if not path.exists():
+        return
+
+    with path.open("r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            if line.startswith("export "):
+                line = line[len("export "):].strip()
+
+            if "=" not in line:
+                continue
+
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip()
+            if not key or key in os.environ:
+                continue
+
+            try:
+                parsed = shlex.split(value, posix=True)
+                if parsed:
+                    value = parsed[0]
+            except ValueError:
+                pass
+            os.environ[key] = value
+
+
 def _load_yaml(path: Path) -> Dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
@@ -129,6 +161,13 @@ def _load_yaml(path: Path) -> Dict[str, Any]:
 
 def load_config(path: str | os.PathLike[str]) -> AppConfig:
     path = Path(path)
+    dotenv_candidates = [
+        Path.cwd() / ".env",
+        path.parent / ".env",
+        path.parent.parent / ".env",
+    ]
+    for dotenv_path in dotenv_candidates:
+        _load_dotenv(dotenv_path)
     raw = _load_yaml(path)
 
     if "extends" in raw and raw["extends"]:
