@@ -4,3 +4,5 @@ data/raw/*
 data/converted/*
 outputs/*
 cache/
+
+*/__pycache__/
