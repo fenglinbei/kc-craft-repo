@@ -13,7 +13,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from kg_craft.data import load_jsonl
-from kg_craft.evaluation import compute_metrics
+from kg_craft.evaluation import compute_metrics, save_metrics_figure
 from kg_craft.utils import setup_logging
 
 
@@ -22,6 +22,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--predictions", required=True, help="Prediction JSONL path.")
     parser.add_argument("--label-field", default="label")
     parser.add_argument("--pred-field", default="prediction")
+    parser.add_argument(
+        "--metrics-figure",
+        default=None,
+        help="Optional path to save metrics+confusion-matrix figure (PNG).",
+    )
     parser.add_argument(
         "--log-level",
         default="INFO",
@@ -52,6 +57,9 @@ def main() -> None:
 
     metrics = compute_metrics(y_true, y_pred)
     logger.info("Evaluated %d rows.", len(y_true))
+    if args.metrics_figure:
+        saved_path = save_metrics_figure(metrics, args.metrics_figure, title="KG-CRAFT Evaluation Metrics")
+        logger.info("Saved metrics figure to %s", saved_path)
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
 
 
