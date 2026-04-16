@@ -21,14 +21,24 @@ class KGExtractor:
         self.client = client
 
     def extract(self, text: str) -> KGExtractionOutput:
-        prompt = build_operational_kg_extraction_prompt(text)
-        messages = [{"role": "user", "content": prompt}]
-        response = self.client.chat(messages=messages)
-        parsed = safe_json_loads(response.content)
-        kg = parse_kg_json(parsed)
-        return KGExtractionOutput(kg=kg, raw_text=response.content, raw_response=response.raw)
+        return self.extract_batch([text])[0]
 
-
+    def extract_batch(self, texts: List[str]) -> List[KGExtractionOutput]:
+        if not texts:
+            return []
+        prompts = [build_operational_kg_extraction_prompt(text) for text in texts]
+        messages_batch = [[{"role": "user", "content": prompt}] for prompt in prompts]
+        responses = self.client.chat_batch(messages_batch=messages_batch)
+        if len(responses) != len(texts):
+            raise ValueError(
+                f"Batch KG extraction response size mismatch: expected={len(texts)} got={len(responses)}"
+            )
+        outputs: List[KGExtractionOutput] = []
+        for text, response in zip(texts, responses):
+            parsed = safe_json_loads(response.content)
+            kg = parse_kg_json(parsed)
+            outputs.append(KGExtractionOutput(kg=kg, raw_text=response.content, raw_response=response.raw))
+        return outputs
 
 def parse_kg_json(payload: dict) -> KnowledgeGraph:
     entities_raw = payload.get("entities", []) or []
