@@ -16,9 +16,19 @@ _ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)\}")
 
 @dataclass
 class LLMConfig:
-    api_key: str
-    api_base: str
-    model: str
+    backend: str = "openai_compatible"
+    api_key: str = ""
+    api_base: str = ""
+    model: str = ""
+    local_model_path: Optional[str] = None
+    local_tensor_parallel_size: int = 1
+    local_dtype: str = "bfloat16"
+    local_max_model_len: int = 16384
+    local_gpu_memory_utilization: float = 0.9
+    local_max_num_batched_tokens: int = 16384
+    local_max_num_seqs: int = 16
+    local_async_scheduling: bool = True
+    local_trust_remote_code: bool = True
     timeout: int = 120
     temperature: float = 0.0
     max_tokens: int = 2048

@@ -15,6 +15,10 @@ from .utils import ensure_dir, stable_hash
 LOGGER = logging.getLogger(__name__)
 
 
+def _normalize_backend(value: str) -> str:
+    return value.strip().lower().replace("-", "_")
+
+
 @dataclass
 class ChatResponse:
     content: str
@@ -44,8 +48,94 @@ class OpenAICompatibleChatClient:
         self.debug_tail_chars = debug_tail_chars
         self.session = requests.Session()
         self.cache_dir = ensure_dir(Path(self.cache_cfg.cache_dir) / namespace) if self.cache_cfg.enabled else None
+        self.backend = _normalize_backend(self.cfg.backend)
+        self._local_llm: Any = None
+        self._local_sampling_params_cls: Any = None
+        self._local_tokenizer: Any = None
+        if self.backend == "local_vllm":
+            self._init_local_vllm()
+
+    def _init_local_vllm(self) -> None:
+        try:
+            from transformers import AutoTokenizer
+            from vllm import LLM, SamplingParams
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(
+                "backend=local_vllm requires both 'vllm' and 'transformers' installed"
+            ) from exc
+
+        model_path = self.cfg.local_model_path or self.cfg.model
+        if not model_path:
+            raise ValueError("local_vllm backend requires local_model_path (or model) in config")
+
+        self._local_llm = LLM(
+            model=model_path,
+            tensor_parallel_size=max(1, int(self.cfg.local_tensor_parallel_size)),
+            dtype=self.cfg.local_dtype,
+            max_model_len=int(self.cfg.local_max_model_len),
+            gpu_memory_utilization=float(self.cfg.local_gpu_memory_utilization),
+            max_num_batched_tokens=int(self.cfg.local_max_num_batched_tokens),
+            max_num_seqs=int(self.cfg.local_max_num_seqs),
+            async_scheduling=bool(self.cfg.local_async_scheduling),
+            trust_remote_code=bool(self.cfg.local_trust_remote_code),
+        )
+        self._local_sampling_params_cls = SamplingParams
+        self._local_tokenizer = AutoTokenizer.from_pretrained(
+            model_path,
+            trust_remote_code=bool(self.cfg.local_trust_remote_code),
+        )
+
+    @staticmethod
+    def _raw_from_content(content: str) -> Dict[str, Any]:
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": content,
+                    }
+                }
+            ]
+        }
+
+    def _build_local_sampling_params(self, extra_body: Optional[Dict[str, Any]] = None) -> Any:
+        assert self._local_sampling_params_cls is not None
+        params: Dict[str, Any] = {
+            "temperature": self.cfg.temperature,
+            "top_p": self.cfg.top_p,
+            "max_tokens": self.cfg.max_tokens,
+        }
+        if self.cfg.extra_body:
+            params.update(self.cfg.extra_body)
+        if extra_body:
+            params.update(extra_body)
+        return self._local_sampling_params_cls(**params)
+
+    def _messages_to_local_prompt(self, messages: List[Dict[str, Any]]) -> str:
+        assert self._local_tokenizer is not None
+        normalized_messages = []
+        for message in messages:
+            normalized_messages.append(
+                {
+                    "role": str(message.get("role", "user")),
+                    "content": self._normalize_content(message.get("content", "")),
+                }
+            )
+        return self._local_tokenizer.apply_chat_template(
+            normalized_messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
+    def _local_generate(self, prompts: List[str], extra_body: Optional[Dict[str, Any]] = None) -> List[str]:
+        assert self._local_llm is not None
+        sampling_params = self._build_local_sampling_params(extra_body=extra_body)
+        outputs = self._local_llm.generate(prompts, sampling_params)
+        return [output.outputs[0].text if output.outputs else "" for output in outputs]
 
     def _url(self) -> str:
+        if self.backend != "openai_compatible":
+            raise RuntimeError(f"_url() is only valid for openai_compatible backend, got {self.backend}")
         base = self.cfg.api_base.rstrip("/")
         if base.endswith("/chat/completions"):
             return base
@@ -141,6 +231,27 @@ class OpenAICompatibleChatClient:
         if extra_body:
             payload.update(extra_body)
 
+        if self.backend == "local_vllm":
+            if response_format is not None or self.cfg.response_format:
+                LOGGER.warning("local_vllm backend ignores response_format; text output only")
+            self._debug_log_request(payload)
+            started = time.perf_counter()
+            if self.cache_cfg.enabled and self.cache_dir is not None:
+                cache_path = self._cache_path(payload)
+                if cache_path.exists():
+                    raw = json.loads(cache_path.read_text(encoding="utf-8"))
+                    content = self._extract_content(raw)
+                    self._debug_log_response(content=content, elapsed_seconds=time.perf_counter() - started, cached=True)
+                    return ChatResponse(content=content, raw=raw, cached=True)
+
+            prompt = self._messages_to_local_prompt(messages)
+            generated = self._local_generate([prompt], extra_body=extra_body)[0]
+            raw = self._raw_from_content(generated)
+            if self.cache_cfg.enabled and self.cache_dir is not None:
+                cache_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._debug_log_response(content=generated, elapsed_seconds=time.perf_counter() - started, cached=False)
+            return ChatResponse(content=generated, raw=raw, cached=False)
+
         self._debug_log_request(payload)
         started = time.perf_counter()
         if self.cache_cfg.enabled and self.cache_dir is not None:
@@ -219,6 +330,46 @@ class OpenAICompatibleChatClient:
             payload.update(self.cfg.extra_body)
         if extra_body:
             payload.update(extra_body)
+
+        if self.backend == "local_vllm":
+            if response_format is not None or self.cfg.response_format:
+                LOGGER.warning("local_vllm backend ignores response_format; text output only")
+            self._debug_log_request(payload)
+            started = time.perf_counter()
+            if self.cache_cfg.enabled and self.cache_dir is not None:
+                cache_path = self._cache_path(payload)
+                if cache_path.exists():
+                    raw = json.loads(cache_path.read_text(encoding="utf-8"))
+                    contents = self._extract_batch_contents(raw)
+                    self._debug_log_response(
+                        content="\n\n".join(contents),
+                        elapsed_seconds=time.perf_counter() - started,
+                        cached=True,
+                    )
+                    return [ChatResponse(content=c, raw=raw, cached=True) for c in contents]
+
+            prompts = [self._messages_to_local_prompt(messages) for messages in messages_batch]
+            contents = self._local_generate(prompts, extra_body=extra_body)
+            raw = {
+                "choices": [
+                    {
+                        "index": idx,
+                        "message": {
+                            "role": "assistant",
+                            "content": content,
+                        },
+                    }
+                    for idx, content in enumerate(contents)
+                ]
+            }
+            if self.cache_cfg.enabled and self.cache_dir is not None:
+                cache_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._debug_log_response(
+                content="\n\n".join(contents),
+                elapsed_seconds=time.perf_counter() - started,
+                cached=False,
+            )
+            return [ChatResponse(content=c, raw=raw, cached=False) for c in contents]
 
         self._debug_log_request(payload)
         started = time.perf_counter()

@@ -25,9 +25,19 @@ cache:
 
 models:
   kg_llm:
+    backend: openai_compatible
     api_key: ${KG_API_KEY}
     api_base: ${KG_API_BASE}
     model: ${KG_MODEL}
+    local_model_path: ""
+    local_tensor_parallel_size: 1
+    local_dtype: bfloat16
+    local_max_model_len: 16384
+    local_gpu_memory_utilization: 0.9
+    local_max_num_batched_tokens: 16384
+    local_max_num_seqs: 16
+    local_async_scheduling: true
+    local_trust_remote_code: true
     timeout: 120
     temperature: 0.0
     max_tokens: 8192
@@ -40,9 +50,19 @@ models:
     extra_body: {}
 
   reasoning_llm:
+    backend: openai_compatible
     api_key: ${REASONING_API_KEY}
     api_base: ${REASONING_API_BASE}
     model: ${REASONING_MODEL}
+    local_model_path: ""
+    local_tensor_parallel_size: 1
+    local_dtype: bfloat16
+    local_max_model_len: 16384
+    local_gpu_memory_utilization: 0.9
+    local_max_num_batched_tokens: 16384
+    local_max_num_seqs: 16
+    local_async_scheduling: true
+    local_trust_remote_code: true
     timeout: 120
     temperature: 0.0
     max_tokens: 8192
