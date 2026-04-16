@@ -28,6 +28,7 @@ class OpenAICompatibleChatClient:
         cfg: LLMConfig,
         cache_cfg: Optional[CacheConfig] = None,
         namespace: str = "default",
+        enable_messages_batch_api: bool = True,
         debug: bool = False,
         debug_preview_chars: int = 1200,
         debug_head_chars: int = 450,
@@ -36,6 +37,7 @@ class OpenAICompatibleChatClient:
         self.cfg = cfg
         self.cache_cfg = cache_cfg or CacheConfig(enabled=False)
         self.namespace = namespace
+        self.enable_messages_batch_api = enable_messages_batch_api
         self.debug = debug
         self.debug_preview_chars = debug_preview_chars
         self.debug_head_chars = debug_head_chars
@@ -191,6 +193,15 @@ class OpenAICompatibleChatClient:
     ) -> List[ChatResponse]:
         if not messages_batch:
             return []
+        if not self.enable_messages_batch_api:
+            return [
+                self.chat(
+                    messages=messages,
+                    response_format=response_format,
+                    extra_body=extra_body,
+                )
+                for messages in messages_batch
+            ]
 
         payload: Dict[str, Any] = {
             "model": self.cfg.model,

@@ -33,6 +33,7 @@ LOGGER = logging.getLogger(__name__)
 class KGCRAFTPipeline:
     def __init__(self, config: AppConfig):
         self.config = config
+        enable_messages_batch_api = max(1, config.run.batch_size) > 1
         if "kg_llm" not in config.models:
             raise KeyError("config.models must include 'kg_llm'")
         if "reasoning_llm" not in config.models:
@@ -42,6 +43,7 @@ class KGCRAFTPipeline:
             config.models["kg_llm"],
             cache_cfg=config.cache,
             namespace="kg_llm",
+            enable_messages_batch_api=enable_messages_batch_api,
             debug=config.run.debug,
             debug_preview_chars=config.run.debug_preview_chars,
             debug_head_chars=config.run.debug_head_chars,
@@ -51,6 +53,7 @@ class KGCRAFTPipeline:
             config.models["reasoning_llm"],
             cache_cfg=config.cache,
             namespace="reasoning_llm",
+            enable_messages_batch_api=enable_messages_batch_api,
             debug=config.run.debug,
             debug_preview_chars=config.run.debug_preview_chars,
             debug_head_chars=config.run.debug_head_chars,
