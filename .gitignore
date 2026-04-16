@@ -1,3 +1,6 @@
 models/
 .env
 data/raw/*
+data/converted/*
+outputs/*
+cache/

@@ -125,10 +125,7 @@ export REASONING_MODEL="gpt-4o"
 ### 5.1 完整 KG-CRAFT
 
 ```bash
-python scripts/run_pipeline.py \
-  --config configs/liar_raw.yaml \
-  --input data/example_input.jsonl \
-  --output outputs/example_full.jsonl
+。
 ```
 
 ### 5.2 Naive LLM baseline

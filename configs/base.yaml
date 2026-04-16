@@ -23,7 +23,7 @@ models:
     model: ${KG_MODEL}
     timeout: 120
     temperature: 0.0
-    max_tokens: 2048
+    max_tokens: 8192
     top_p: 1.0
     max_retries: 3
     retry_wait_seconds: 2.0
@@ -38,7 +38,7 @@ models:
     model: ${REASONING_MODEL}
     timeout: 120
     temperature: 0.0
-    max_tokens: 2048
+    max_tokens: 8192
     top_p: 1.0
     max_retries: 3
     retry_wait_seconds: 2.0
@@ -48,7 +48,7 @@ models:
 
 embedding:
   model_path: ./models/Qwen3-Embedding-0.6B
-  device: cpu
+  device: cuda
   batch_size: 32
   normalize: true
 

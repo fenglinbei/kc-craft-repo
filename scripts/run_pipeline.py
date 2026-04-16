@@ -43,6 +43,8 @@ def main() -> None:
     setup_logging(args.log_level)
     logger = logging.getLogger(__name__)
     config = load_config(args.config)
+    
+    print(f"Loaded config: {config}")
 
     input_path = args.input or config.data.input_path
     output_path = args.output or config.data.output_path
