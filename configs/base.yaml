@@ -3,7 +3,7 @@ run:
   seed: 42
   limit: null
   num_workers: 1
-  batch_size: 1
+  batch_size: 8
   verbose: true
   show_sample_stage_progress: true
   debug: false
