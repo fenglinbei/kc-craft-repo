@@ -82,7 +82,45 @@ def safe_json_loads(text: str) -> Any:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-    return json.loads(extract_first_json_object(text))
+
+    candidate = extract_first_json_object(text)
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError as error:
+        if "Invalid \\escape" not in str(error):
+            raise
+    return json.loads(_escape_invalid_backslashes_in_json_strings(candidate))
+
+
+def _escape_invalid_backslashes_in_json_strings(text: str) -> str:
+    valid_escape_chars = {'"', "\\", "/", "b", "f", "n", "r", "t", "u"}
+    repaired: list[str] = []
+    in_string = False
+    escaped = False
+
+    for idx, ch in enumerate(text):
+        if not in_string:
+            if ch == '"':
+                in_string = True
+            repaired.append(ch)
+            continue
+
+        if ch == "\\":
+            next_ch = text[idx + 1] if idx + 1 < len(text) else ""
+            if next_ch in valid_escape_chars:
+                repaired.append(ch)
+                escaped = True
+            else:
+                repaired.append("\\\\")
+                escaped = False
+            continue
+
+        if ch == '"' and not escaped:
+            in_string = False
+        escaped = False
+        repaired.append(ch)
+
+    return "".join(repaired)
 
 
 def deduplicate_preserve_order(items: Iterable[str]) -> list[str]:
