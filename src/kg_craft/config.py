@@ -67,7 +67,9 @@ class RunConfig:
     mode: str = "full"
     seed: int = 42
     limit: Optional[int] = None
+    num_workers: int = 1
     verbose: bool = True
+    show_sample_stage_progress: bool = True
     debug: bool = False
     debug_preview_chars: int = 1200
     debug_head_chars: int = 450

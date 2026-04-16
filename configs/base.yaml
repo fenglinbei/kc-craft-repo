@@ -2,7 +2,9 @@ run:
   mode: full
   seed: 42
   limit: null
+  num_workers: 1
   verbose: true
+  show_sample_stage_progress: true
   debug: false
   debug_preview_chars: 1200
   debug_head_chars: 450

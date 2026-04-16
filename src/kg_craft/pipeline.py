@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import time
 from typing import List
@@ -62,11 +63,38 @@ class KGCRAFTPipeline:
 
     def run(self, samples: List[Sample], mode: str | None = None) -> List[PipelineResult]:
         mode = mode or self.config.run.mode
-        results: List[PipelineResult] = []
         scoped_samples = samples[: self.config.run.limit]
-        LOGGER.info("Pipeline started. mode=%s, samples=%d", mode, len(scoped_samples))
-        for sample in tqdm(scoped_samples, desc=f"KG-CRAFT ({mode})", unit="sample"):
-            results.append(self.run_one(sample, mode=mode))
+        total_samples = len(scoped_samples)
+        num_workers = max(1, self.config.run.num_workers)
+        show_overall_progress = self.config.run.verbose
+
+        LOGGER.info(
+            "Pipeline started. mode=%s, samples=%d, num_workers=%d",
+            mode,
+            total_samples,
+            num_workers,
+        )
+        if num_workers == 1:
+            results: List[PipelineResult] = []
+            iterator = scoped_samples
+            if show_overall_progress:
+                iterator = tqdm(scoped_samples, desc=f"KG-CRAFT ({mode})", unit="sample")
+            for sample in iterator:
+                results.append(self.run_one(sample, mode=mode))
+        else:
+            indexed_results: list[tuple[int, PipelineResult]] = []
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                futures = {
+                    executor.submit(self.run_one, sample, mode): idx
+                    for idx, sample in enumerate(scoped_samples)
+                }
+                iterator = as_completed(futures)
+                if show_overall_progress:
+                    iterator = tqdm(iterator, total=total_samples, desc=f"KG-CRAFT ({mode})", unit="sample")
+                for future in iterator:
+                    idx = futures[future]
+                    indexed_results.append((idx, future.result()))
+            results = [result for _, result in sorted(indexed_results, key=lambda item: item[0])]
         LOGGER.info("Pipeline finished. mode=%s, results=%d", mode, len(results))
         return results
 
@@ -86,8 +114,34 @@ class KGCRAFTPipeline:
             mode=mode,
             meta=sample.meta,
         )
+        show_stage_progress = (
+            self.config.run.verbose
+            and self.config.run.show_sample_stage_progress
+            and self.config.run.num_workers == 1
+        )
+
+        def make_stage_bar(stage_name: str) -> tqdm | None:
+            if not show_stage_progress:
+                return None
+            return tqdm(
+                total=1,
+                desc=f"sample={sample.sample_id} | {stage_name}",
+                unit="stage",
+                leave=False,
+            )
+
+        def close_stage_bar(stage_bar: tqdm | None) -> None:
+            if stage_bar is None:
+                return
+            stage_bar.update(1)
+            stage_bar.close()
 
         if mode == "naive_llm":
+            kg_bar = make_stage_bar("KG生成阶段（跳过）")
+            close_stage_bar(kg_bar)
+            qa_bar = make_stage_bar("QA阶段（跳过）")
+            close_stage_bar(qa_bar)
+            classification_bar = make_stage_bar("分类阶段")
             context = truncate_text(
                 join_reports(sample.reports),
                 self.config.pipeline.max_context_chars_for_verification,
@@ -99,6 +153,7 @@ class KGCRAFTPipeline:
                 labels=labels,
                 label_descriptions=label_descriptions,
             )
+            close_stage_bar(classification_bar)
             if self.config.run.debug:
                 LOGGER.debug(
                     "[debug][pipeline] sample_id=%s step=naive_verification elapsed=%.3fs prediction=%s",
@@ -109,6 +164,7 @@ class KGCRAFTPipeline:
             return result
 
         # Shared KG extraction for full / kg_only / llm_questions
+        kg_bar = make_stage_bar("KG生成阶段")
         claim_kg_out = self.kg_extractor.extract(sample.claim)
         report_kgs_out = [self.kg_extractor.extract(report) for report in sample.reports]
         merged_kg = merge_kgs([claim_kg_out.kg] + [x.kg for x in report_kgs_out])
@@ -126,8 +182,12 @@ class KGCRAFTPipeline:
         if self.config.pipeline.save_raw_api_responses:
             result.raw_outputs["claim_kg_response"] = claim_kg_out.raw_response
             result.raw_outputs["report_kg_responses"] = [x.raw_response for x in report_kgs_out]
+        close_stage_bar(kg_bar)
 
         if mode == "kg_only":
+            qa_bar = make_stage_bar("QA阶段（跳过）")
+            close_stage_bar(qa_bar)
+            classification_bar = make_stage_bar("分类阶段")
             result.prediction = verify_with_kg_only(
                 client=self.reasoning_client,
                 claim=sample.claim,
@@ -135,6 +195,7 @@ class KGCRAFTPipeline:
                 labels=labels,
                 label_descriptions=label_descriptions,
             )
+            close_stage_bar(classification_bar)
             if self.config.run.debug:
                 LOGGER.debug(
                     "[debug][pipeline] sample_id=%s step=kg_only_verification elapsed=%.3fs prediction=%s",
@@ -167,6 +228,7 @@ class KGCRAFTPipeline:
         else:
             raise ValueError(f"Unsupported mode: {mode!r}")
 
+        qa_bar = make_stage_bar("QA阶段")
         qa_pairs = answer_questions(
             client=self.reasoning_client,
             claim=sample.claim,
@@ -179,6 +241,9 @@ class KGCRAFTPipeline:
             claim=sample.claim,
             qa_pairs=qa_pairs,
         )
+        close_stage_bar(qa_bar)
+
+        classification_bar = make_stage_bar("分类阶段")
         prediction = verify_claim(
             client=self.reasoning_client,
             claim=sample.claim,
@@ -186,6 +251,7 @@ class KGCRAFTPipeline:
             labels=labels,
             label_descriptions=label_descriptions,
         )
+        close_stage_bar(classification_bar)
 
         result.candidate_questions = candidate_questions
         result.selected_questions = selected_questions
