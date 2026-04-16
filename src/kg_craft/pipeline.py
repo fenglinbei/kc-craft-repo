@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 import logging
+import time
 from typing import List
 
 from tqdm import tqdm
@@ -37,11 +38,19 @@ class KGCRAFTPipeline:
             config.models["kg_llm"],
             cache_cfg=config.cache,
             namespace="kg_llm",
+            debug=config.run.debug,
+            debug_preview_chars=config.run.debug_preview_chars,
+            debug_head_chars=config.run.debug_head_chars,
+            debug_tail_chars=config.run.debug_tail_chars,
         )
         self.reasoning_client = OpenAICompatibleChatClient(
             config.models["reasoning_llm"],
             cache_cfg=config.cache,
             namespace="reasoning_llm",
+            debug=config.run.debug,
+            debug_preview_chars=config.run.debug_preview_chars,
+            debug_head_chars=config.run.debug_head_chars,
+            debug_tail_chars=config.run.debug_tail_chars,
         )
         self.kg_extractor = KGExtractor(self.kg_client)
         self.embedder = LocalSentenceEmbedder(
@@ -64,6 +73,7 @@ class KGCRAFTPipeline:
     def run_one(self, sample: Sample, mode: str | None = None) -> PipelineResult:
         mode = mode or self.config.run.mode
         LOGGER.debug("Processing sample_id=%s mode=%s", sample.sample_id, mode)
+        sample_started = time.perf_counter()
         labels = self.config.verification.labels
         label_descriptions = self.config.verification.label_descriptions
 
@@ -89,6 +99,13 @@ class KGCRAFTPipeline:
                 labels=labels,
                 label_descriptions=label_descriptions,
             )
+            if self.config.run.debug:
+                LOGGER.debug(
+                    "[debug][pipeline] sample_id=%s step=naive_verification elapsed=%.3fs prediction=%s",
+                    sample.sample_id,
+                    time.perf_counter() - sample_started,
+                    result.prediction,
+                )
             return result
 
         # Shared KG extraction for full / kg_only / llm_questions
@@ -118,6 +135,13 @@ class KGCRAFTPipeline:
                 labels=labels,
                 label_descriptions=label_descriptions,
             )
+            if self.config.run.debug:
+                LOGGER.debug(
+                    "[debug][pipeline] sample_id=%s step=kg_only_verification elapsed=%.3fs prediction=%s",
+                    sample.sample_id,
+                    time.perf_counter() - sample_started,
+                    result.prediction,
+                )
             return result
 
         if mode == "full":
@@ -168,4 +192,12 @@ class KGCRAFTPipeline:
         result.qa_pairs = [qa.to_dict() for qa in qa_pairs]
         result.contrastive_summary = summary
         result.prediction = prediction
+        if self.config.run.debug:
+            LOGGER.debug(
+                "[debug][pipeline] sample_id=%s step=full_pipeline_done elapsed=%.3fs selected_questions=%d prediction=%s",
+                sample.sample_id,
+                time.perf_counter() - sample_started,
+                len(selected_questions),
+                prediction,
+            )
         return result

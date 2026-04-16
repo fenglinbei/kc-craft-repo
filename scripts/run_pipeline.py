@@ -34,17 +34,25 @@ def parse_args() -> argparse.Namespace:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="Logging level.",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable detailed debug logs for each pipeline/API step.",
+    )
     return parser.parse_args()
 
 
 
 def main() -> None:
     args = parse_args()
-    setup_logging(args.log_level)
+    log_level = "DEBUG" if args.debug else args.log_level
+    setup_logging(log_level)
     logger = logging.getLogger(__name__)
     config = load_config(args.config)
-    
-    print(f"Loaded config: {config}")
+    if args.debug:
+        config.run.debug = True
+        if args.log_level != "DEBUG":
+            logger.warning("--debug enabled; log level forced to DEBUG for complete traces.")
 
     input_path = args.input or config.data.input_path
     output_path = args.output or config.data.output_path
