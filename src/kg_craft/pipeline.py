@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import asdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
+from pathlib import Path
 import time
-from typing import List
+from typing import Any, List
 
 from tqdm import tqdm
 
@@ -18,7 +19,7 @@ from .contrastive import (
     summarize_qa_pairs,
 )
 from .embeddings import LocalSentenceEmbedder
-from .evaluation import compute_metrics
+from .evaluation import compute_metrics, save_metrics_figure
 from .kg_extraction import KGExtractor, merge_kgs, triples_from_claim_in_merged_graph
 from .prompts import format_kg_as_text
 from .schemas import PipelineResult, Sample
@@ -67,39 +68,49 @@ class KGCRAFTPipeline:
         scoped_samples = samples[: self.config.run.limit]
         total_samples = len(scoped_samples)
         num_workers = max(1, self.config.run.num_workers)
+        batch_size = max(1, self.config.run.batch_size)
         show_overall_progress = self.config.run.verbose
 
         LOGGER.info(
-            "Pipeline started. mode=%s, samples=%d, num_workers=%d",
+            "Pipeline started. mode=%s, samples=%d, num_workers=%d, batch_size=%d",
             mode,
             total_samples,
             num_workers,
+            batch_size,
         )
+        progress_bar: tqdm | None = None
+        if show_overall_progress:
+            progress_bar = tqdm(total=total_samples, desc=f"KG-CRAFT ({mode})", unit="sample")
+
         if num_workers == 1:
             results: List[PipelineResult] = []
-            iterator = scoped_samples
-            if show_overall_progress:
-                iterator = tqdm(scoped_samples, desc=f"KG-CRAFT ({mode})", unit="sample")
-            for sample in iterator:
-                result = self.run_one(sample, mode=mode)
-                results.append(result)
-                self._log_running_metrics(results, sample_id=sample.sample_id)
+            for batch_start in range(0, total_samples, batch_size):
+                batch = scoped_samples[batch_start : batch_start + batch_size]
+                for sample in batch:
+                    result = self.run_one(sample, mode=mode)
+                    results.append(result)
+                    self._log_running_metrics(results, sample_id=sample.sample_id, progress_bar=progress_bar)
         else:
             indexed_results: list[tuple[int, PipelineResult]] = []
             with ThreadPoolExecutor(max_workers=num_workers) as executor:
-                futures = {
-                    executor.submit(self.run_one, sample, mode): idx
-                    for idx, sample in enumerate(scoped_samples)
-                }
-                iterator = as_completed(futures)
-                if show_overall_progress:
-                    iterator = tqdm(iterator, total=total_samples, desc=f"KG-CRAFT ({mode})", unit="sample")
-                for future in iterator:
-                    idx = futures[future]
-                    result = future.result()
-                    indexed_results.append((idx, result))
-                    self._log_running_metrics([x[1] for x in indexed_results], sample_id=result.sample_id)
+                for batch_start in range(0, total_samples, batch_size):
+                    batch_items = list(enumerate(scoped_samples[batch_start : batch_start + batch_size], start=batch_start))
+                    futures = {
+                        executor.submit(self.run_one, sample, mode): idx
+                        for idx, sample in batch_items
+                    }
+                    for future in as_completed(futures):
+                        idx = futures[future]
+                        result = future.result()
+                        indexed_results.append((idx, result))
+                        self._log_running_metrics(
+                            [x[1] for x in indexed_results],
+                            sample_id=result.sample_id,
+                            progress_bar=progress_bar,
+                        )
             results = [result for _, result in sorted(indexed_results, key=lambda item: item[0])]
+        if progress_bar is not None:
+            progress_bar.close()
         self._log_final_metrics(results)
         LOGGER.info("Pipeline finished. mode=%s, results=%d", mode, len(results))
         return results
@@ -119,15 +130,29 @@ class KGCRAFTPipeline:
             y_pred.append(pred)
         return y_true, y_pred
 
-    def _log_running_metrics(self, results: List[PipelineResult], sample_id: str) -> None:
+    @staticmethod
+    def _format_running_metrics_postfix(metrics: dict[str, Any], n: int) -> str:
+        return (
+            f"running macro P/R/F1={metrics['macro_precision']:.4f}/"
+            f"{metrics['macro_recall']:.4f}/{metrics['macro_f1']:.4f} (n={n})"
+        )
+
+    def _log_running_metrics(self, results: List[PipelineResult], sample_id: str, progress_bar: tqdm | None = None) -> None:
         y_true, y_pred = self._labeled_pairs(results)
+        if progress_bar is not None:
+            progress_bar.update(1)
         if not y_true:
             LOGGER.info(
                 "sample_id=%s classification finished. P/R/F1 unavailable (missing labels or predictions).",
                 sample_id,
             )
+            if progress_bar is not None:
+                progress_bar.set_postfix_str("running macro P/R/F1 unavailable")
             return
         metrics = compute_metrics(y_true, y_pred)
+        running_postfix = self._format_running_metrics_postfix(metrics, n=len(y_true))
+        if progress_bar is not None:
+            progress_bar.set_postfix_str(running_postfix)
         LOGGER.info(
             "sample_id=%s classification finished. running macro P/R/F1 = %.4f / %.4f / %.4f (n=%d)",
             sample_id,
@@ -171,6 +196,28 @@ class KGCRAFTPipeline:
             macro_values.get("recall", 0.0),
             macro_values.get("f1-score", 0.0),
         )
+        labels = metrics.get("labels", [])
+        matrix = metrics.get("confusion_matrix", [])
+        if labels and matrix:
+            LOGGER.info("Final confusion matrix labels: %s", labels)
+            for idx, row in enumerate(matrix):
+                LOGGER.info("Final confusion matrix row true=%s: %s", labels[idx], row)
+        self._save_final_metrics_figure(metrics, mode=results[0].mode if results else self.config.run.mode)
+
+    def _save_final_metrics_figure(self, metrics: dict[str, Any], mode: str) -> None:
+        output_path = self.config.data.output_path
+        if output_path:
+            output_dir = Path(output_path).resolve().parent
+        else:
+            output_dir = Path.cwd() / "outputs"
+        figure_path = output_dir / f"metrics_{mode}.png"
+        try:
+            saved_path = save_metrics_figure(metrics, figure_path, title=f"KG-CRAFT Final Metrics ({mode})")
+            LOGGER.info("Saved final metrics figure to %s", saved_path)
+        except ImportError as exc:
+            LOGGER.warning("Skip metrics figure export because plotting dependency is missing: %s", exc)
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Failed to save metrics figure: %s", exc)
 
     def run_one(self, sample: Sample, mode: str | None = None) -> PipelineResult:
         mode = mode or self.config.run.mode

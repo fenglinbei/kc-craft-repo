@@ -74,6 +74,7 @@ def main() -> None:
     input_path = args.input or config.data.input_path
     output_path = args.output or config.data.output_path
     mode = args.mode or config.run.mode
+    config.data.output_path = output_path
 
     if not input_path:
         raise ValueError("Input path is required via --input or data.input_path in config.")

@@ -68,6 +68,7 @@ class RunConfig:
     seed: int = 42
     limit: Optional[int] = None
     num_workers: int = 1
+    batch_size: int = 1
     verbose: bool = True
     show_sample_stage_progress: bool = True
     debug: bool = False
