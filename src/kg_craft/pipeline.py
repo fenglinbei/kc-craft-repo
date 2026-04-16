@@ -14,6 +14,7 @@ from .config import AppConfig
 from .contrastive import (
     answer_questions,
     generate_candidate_questions_from_kg,
+    generate_questions_with_llm_batch,
     generate_questions_with_llm,
     mmr_rerank_questions,
     summarize_qa_pairs,
@@ -86,8 +87,8 @@ class KGCRAFTPipeline:
             results: List[PipelineResult] = []
             for batch_start in range(0, total_samples, batch_size):
                 batch = scoped_samples[batch_start : batch_start + batch_size]
-                for sample in batch:
-                    result = self.run_one(sample, mode=mode)
+                batch_results = self.run_batch(batch, mode=mode)
+                for sample, result in zip(batch, batch_results):
                     results.append(result)
                     self._log_running_metrics(results, sample_id=sample.sample_id, progress_bar=progress_bar)
         else:
@@ -114,6 +115,89 @@ class KGCRAFTPipeline:
         self._log_final_metrics(results)
         LOGGER.info("Pipeline finished. mode=%s, results=%d", mode, len(results))
         return results
+
+    def run_batch(self, samples: List[Sample], mode: str | None = None) -> List[PipelineResult]:
+        mode = mode or self.config.run.mode
+        if not samples:
+            return []
+        if mode != "llm_questions":
+            return [self.run_one(sample, mode=mode) for sample in samples]
+        return self._run_batch_llm_questions(samples=samples, mode=mode)
+
+    def _run_batch_llm_questions(self, samples: List[Sample], mode: str) -> List[PipelineResult]:
+        base_results = [self._run_one_before_question_generation(sample, mode) for sample in samples]
+        question_batches = generate_questions_with_llm_batch(
+            client=self.reasoning_client,
+            claims=[sample.claim for sample in samples],
+            reports_list=[sample.reports for sample in samples],
+            num_questions=self.config.pipeline.max_contrastive_questions,
+            examples=self.config.prompts.llm_question_examples,
+        )
+        for result, questions in zip(base_results, question_batches):
+            selected_questions = questions[: self.config.pipeline.max_contrastive_questions]
+            result.candidate_questions = selected_questions
+            result.selected_questions = selected_questions
+            qa_pairs = answer_questions(
+                client=self.reasoning_client,
+                claim=result.claim,
+                reports=result.reports,
+                questions=selected_questions,
+                max_context_chars=self.config.pipeline.max_context_chars_for_answers,
+            )
+            result.qa_pairs = [asdict(qa) for qa in qa_pairs]
+            summary = summarize_qa_pairs(client=self.reasoning_client, claim=result.claim, qa_pairs=qa_pairs)
+            result.qa_summary = summary
+            context_for_verification = truncate_text(
+                summary,
+                self.config.pipeline.max_context_chars_for_verification,
+            )
+            result.prediction = verify_claim(
+                client=self.reasoning_client,
+                claim=result.claim,
+                context=context_for_verification,
+                labels=self.config.verification.labels,
+                label_descriptions=self.config.verification.label_descriptions,
+            )
+        return base_results
+
+    def _run_one_before_question_generation(self, sample: Sample, mode: str) -> PipelineResult:
+        labels = self.config.verification.labels
+        label_descriptions = self.config.verification.label_descriptions
+        result = PipelineResult(
+            sample_id=sample.sample_id,
+            claim=sample.claim,
+            reports=sample.reports,
+            label=sample.label,
+            prediction="",
+            mode=mode,
+            meta=sample.meta,
+        )
+        kg_outputs = self.kg_extractor.extract_batch([sample.claim] + sample.reports)
+        claim_kg_out = kg_outputs[0]
+        report_kgs_out = kg_outputs[1:]
+        merged_kg = merge_kgs([claim_kg_out.kg] + [x.kg for x in report_kgs_out])
+        claim_triples = triples_from_claim_in_merged_graph(claim_kg_out.kg, merged_kg)
+        kg_text = format_kg_as_text(
+            entities=merged_kg.to_dict()["entities"],
+            triples=merged_kg.to_dict()["triples"],
+        )
+        result.claim_kg = claim_kg_out.kg.to_dict()
+        result.report_kgs = [x.kg.to_dict() for x in report_kgs_out]
+        result.merged_kg = merged_kg.to_dict()
+        result.claim_triples = [t.to_dict() for t in claim_triples]
+        result.kg_text = kg_text
+        if self.config.pipeline.save_raw_api_responses:
+            result.raw_outputs["claim_kg_response"] = claim_kg_out.raw_response
+            result.raw_outputs["report_kg_responses"] = [x.raw_response for x in report_kgs_out]
+        if mode == "kg_only":
+            result.prediction = verify_with_kg_only(
+                client=self.reasoning_client,
+                claim=sample.claim,
+                kg_text=kg_text,
+                labels=labels,
+                label_descriptions=label_descriptions,
+            )
+        return result
 
     @staticmethod
     def _labeled_pairs(results: List[PipelineResult]) -> tuple[list[str], list[str]]:
@@ -293,11 +377,11 @@ class KGCRAFTPipeline:
         # Shared KG extraction for full / kg_only / llm_questions
         kg_total_steps = 1 + len(sample.reports)
         kg_bar = make_stage_bar("KG extract", total=kg_total_steps)
-        claim_kg_out = self.kg_extractor.extract(sample.claim)
+        kg_outputs = self.kg_extractor.extract_batch([sample.claim] + sample.reports)
+        claim_kg_out = kg_outputs[0]
         advance_stage_bar(kg_bar)
-        report_kgs_out = []
-        for report in sample.reports:
-            report_kgs_out.append(self.kg_extractor.extract(report))
+        report_kgs_out = kg_outputs[1:]
+        for _ in sample.reports:
             advance_stage_bar(kg_bar)
         merged_kg = merge_kgs([claim_kg_out.kg] + [x.kg for x in report_kgs_out])
         claim_triples = triples_from_claim_in_merged_graph(claim_kg_out.kg, merged_kg)

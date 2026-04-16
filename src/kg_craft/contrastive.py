@@ -130,19 +130,50 @@ def generate_questions_with_llm(
     num_questions: int,
     examples: List[dict] | None = None,
 ) -> List[str]:
-    prompt = build_llm_question_generation_prompt(
-        claim=claim,
-        reports=join_reports(reports),
+    return generate_questions_with_llm_batch(
+        client=client,
+        claims=[claim],
+        reports_list=[reports],
         num_questions=num_questions,
         examples=examples,
-    )
-    response = client.chat(messages=[{"role": "user", "content": prompt}])
-    questions = []
-    for line in response.content.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        line = line.lstrip("-•0123456789. ")
-        if line:
-            questions.append(line)
-    return deduplicate_preserve_order(questions)[:num_questions]
+    )[0]
+
+
+def generate_questions_with_llm_batch(
+    client: OpenAICompatibleChatClient,
+    claims: Sequence[str],
+    reports_list: Sequence[List[str]],
+    num_questions: int,
+    examples: List[dict] | None = None,
+) -> List[List[str]]:
+    if len(claims) != len(reports_list):
+        raise ValueError(f"claims/reports_list size mismatch: {len(claims)} vs {len(reports_list)}")
+    if not claims:
+        return []
+    prompts = [
+        build_llm_question_generation_prompt(
+            claim=claim,
+            reports=join_reports(reports),
+            num_questions=num_questions,
+            examples=examples,
+        )
+        for claim, reports in zip(claims, reports_list)
+    ]
+    messages_batch = [[{"role": "user", "content": prompt}] for prompt in prompts]
+    responses = client.chat_batch(messages_batch=messages_batch)
+    if len(responses) != len(claims):
+        raise ValueError(
+            f"Batch question generation response size mismatch: expected={len(claims)} got={len(responses)}"
+        )
+    all_questions: List[List[str]] = []
+    for response in responses:
+        questions: List[str] = []
+        for line in response.content.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            line = line.lstrip("-•0123456789. ")
+            if line:
+                questions.append(line)
+        all_questions.append(deduplicate_preserve_order(questions)[:num_questions])
+    return all_questions
