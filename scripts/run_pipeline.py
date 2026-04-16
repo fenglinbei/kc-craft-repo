@@ -39,6 +39,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable detailed debug logs for each pipeline/API step.",
     )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=None,
+        help="Number of worker threads used to process samples in parallel.",
+    )
+    parser.add_argument(
+        "--no-sample-progress",
+        action="store_true",
+        help="Disable per-sample stage progress bars (KG/QA/分类).",
+    )
     return parser.parse_args()
 
 
@@ -49,6 +60,12 @@ def main() -> None:
     setup_logging(log_level)
     logger = logging.getLogger(__name__)
     config = load_config(args.config)
+    if args.num_workers is not None:
+        if args.num_workers < 1:
+            raise ValueError("--num-workers must be >= 1")
+        config.run.num_workers = args.num_workers
+    if args.no_sample_progress:
+        config.run.show_sample_stage_progress = False
     if args.debug:
         config.run.debug = True
         if args.log_level != "DEBUG":

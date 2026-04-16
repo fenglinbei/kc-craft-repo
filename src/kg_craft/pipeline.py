@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import time
 from typing import List
@@ -17,6 +18,7 @@ from .contrastive import (
     summarize_qa_pairs,
 )
 from .embeddings import LocalSentenceEmbedder
+from .evaluation import compute_metrics
 from .kg_extraction import KGExtractor, merge_kgs, triples_from_claim_in_merged_graph
 from .prompts import format_kg_as_text
 from .schemas import PipelineResult, Sample
@@ -62,13 +64,113 @@ class KGCRAFTPipeline:
 
     def run(self, samples: List[Sample], mode: str | None = None) -> List[PipelineResult]:
         mode = mode or self.config.run.mode
-        results: List[PipelineResult] = []
         scoped_samples = samples[: self.config.run.limit]
-        LOGGER.info("Pipeline started. mode=%s, samples=%d", mode, len(scoped_samples))
-        for sample in tqdm(scoped_samples, desc=f"KG-CRAFT ({mode})", unit="sample"):
-            results.append(self.run_one(sample, mode=mode))
+        total_samples = len(scoped_samples)
+        num_workers = max(1, self.config.run.num_workers)
+        show_overall_progress = self.config.run.verbose
+
+        LOGGER.info(
+            "Pipeline started. mode=%s, samples=%d, num_workers=%d",
+            mode,
+            total_samples,
+            num_workers,
+        )
+        if num_workers == 1:
+            results: List[PipelineResult] = []
+            iterator = scoped_samples
+            if show_overall_progress:
+                iterator = tqdm(scoped_samples, desc=f"KG-CRAFT ({mode})", unit="sample")
+            for sample in iterator:
+                result = self.run_one(sample, mode=mode)
+                results.append(result)
+                self._log_running_metrics(results, sample_id=sample.sample_id)
+        else:
+            indexed_results: list[tuple[int, PipelineResult]] = []
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                futures = {
+                    executor.submit(self.run_one, sample, mode): idx
+                    for idx, sample in enumerate(scoped_samples)
+                }
+                iterator = as_completed(futures)
+                if show_overall_progress:
+                    iterator = tqdm(iterator, total=total_samples, desc=f"KG-CRAFT ({mode})", unit="sample")
+                for future in iterator:
+                    idx = futures[future]
+                    result = future.result()
+                    indexed_results.append((idx, result))
+                    self._log_running_metrics([x[1] for x in indexed_results], sample_id=result.sample_id)
+            results = [result for _, result in sorted(indexed_results, key=lambda item: item[0])]
+        self._log_final_metrics(results)
         LOGGER.info("Pipeline finished. mode=%s, results=%d", mode, len(results))
         return results
+
+    @staticmethod
+    def _labeled_pairs(results: List[PipelineResult]) -> tuple[list[str], list[str]]:
+        y_true: list[str] = []
+        y_pred: list[str] = []
+        for result in results:
+            if result.label is None:
+                continue
+            gold = str(result.label).strip()
+            pred = str(result.prediction).strip()
+            if not gold or not pred:
+                continue
+            y_true.append(gold)
+            y_pred.append(pred)
+        return y_true, y_pred
+
+    def _log_running_metrics(self, results: List[PipelineResult], sample_id: str) -> None:
+        y_true, y_pred = self._labeled_pairs(results)
+        if not y_true:
+            LOGGER.info(
+                "sample_id=%s classification finished. P/R/F1 unavailable (missing labels or predictions).",
+                sample_id,
+            )
+            return
+        metrics = compute_metrics(y_true, y_pred)
+        LOGGER.info(
+            "sample_id=%s classification finished. running macro P/R/F1 = %.4f / %.4f / %.4f (n=%d)",
+            sample_id,
+            metrics["macro_precision"],
+            metrics["macro_recall"],
+            metrics["macro_f1"],
+            len(y_true),
+        )
+
+    def _log_final_metrics(self, results: List[PipelineResult]) -> None:
+        y_true, y_pred = self._labeled_pairs(results)
+        if not y_true:
+            LOGGER.info("Final metrics unavailable (missing labels or predictions).")
+            return
+
+        metrics = compute_metrics(y_true, y_pred)
+        report = metrics["classification_report"]
+        LOGGER.info(
+            "Final macro P/R/F1 = %.4f / %.4f / %.4f (accuracy=%.4f, n=%d)",
+            metrics["macro_precision"],
+            metrics["macro_recall"],
+            metrics["macro_f1"],
+            metrics["accuracy"],
+            len(y_true),
+        )
+        for label, values in report.items():
+            if label in {"accuracy", "macro avg", "weighted avg"}:
+                continue
+            LOGGER.info(
+                "Final per-class %s: P/R/F1 = %.4f / %.4f / %.4f (support=%s)",
+                label,
+                values.get("precision", 0.0),
+                values.get("recall", 0.0),
+                values.get("f1-score", 0.0),
+                values.get("support", 0),
+            )
+        macro_values = report.get("macro avg", {})
+        LOGGER.info(
+            "Final report macro avg: P/R/F1 = %.4f / %.4f / %.4f",
+            macro_values.get("precision", 0.0),
+            macro_values.get("recall", 0.0),
+            macro_values.get("f1-score", 0.0),
+        )
 
     def run_one(self, sample: Sample, mode: str | None = None) -> PipelineResult:
         mode = mode or self.config.run.mode
@@ -86,8 +188,40 @@ class KGCRAFTPipeline:
             mode=mode,
             meta=sample.meta,
         )
+        show_stage_progress = (
+            self.config.run.verbose
+            and self.config.run.show_sample_stage_progress
+            and self.config.run.num_workers == 1
+        )
+
+        def make_stage_bar(stage_name: str, total: int = 1) -> tqdm | None:
+            if not show_stage_progress:
+                return None
+            return tqdm(
+                total=max(1, total),
+                desc=f"sample={sample.sample_id} | {stage_name}",
+                unit="step",
+                leave=False,
+            )
+
+        def advance_stage_bar(stage_bar: tqdm | None, step: int = 1) -> None:
+            if stage_bar is None:
+                return
+            stage_bar.update(step)
+
+        def close_stage_bar(stage_bar: tqdm | None, ensure_complete: bool = True) -> None:
+            if stage_bar is None:
+                return
+            if ensure_complete and stage_bar.total is not None and stage_bar.n < stage_bar.total:
+                stage_bar.update(stage_bar.total - stage_bar.n)
+            stage_bar.close()
 
         if mode == "naive_llm":
+            kg_bar = make_stage_bar("KG生成阶段（跳过）")
+            close_stage_bar(kg_bar)
+            qa_bar = make_stage_bar("QA阶段（跳过）")
+            close_stage_bar(qa_bar)
+            classification_bar = make_stage_bar("分类阶段")
             context = truncate_text(
                 join_reports(sample.reports),
                 self.config.pipeline.max_context_chars_for_verification,
@@ -99,6 +233,7 @@ class KGCRAFTPipeline:
                 labels=labels,
                 label_descriptions=label_descriptions,
             )
+            close_stage_bar(classification_bar)
             if self.config.run.debug:
                 LOGGER.debug(
                     "[debug][pipeline] sample_id=%s step=naive_verification elapsed=%.3fs prediction=%s",
@@ -109,8 +244,14 @@ class KGCRAFTPipeline:
             return result
 
         # Shared KG extraction for full / kg_only / llm_questions
+        kg_total_steps = 1 + len(sample.reports)
+        kg_bar = make_stage_bar("KG生成阶段", total=kg_total_steps)
         claim_kg_out = self.kg_extractor.extract(sample.claim)
-        report_kgs_out = [self.kg_extractor.extract(report) for report in sample.reports]
+        advance_stage_bar(kg_bar)
+        report_kgs_out = []
+        for report in sample.reports:
+            report_kgs_out.append(self.kg_extractor.extract(report))
+            advance_stage_bar(kg_bar)
         merged_kg = merge_kgs([claim_kg_out.kg] + [x.kg for x in report_kgs_out])
         claim_triples = triples_from_claim_in_merged_graph(claim_kg_out.kg, merged_kg)
         kg_text = format_kg_as_text(
@@ -126,8 +267,12 @@ class KGCRAFTPipeline:
         if self.config.pipeline.save_raw_api_responses:
             result.raw_outputs["claim_kg_response"] = claim_kg_out.raw_response
             result.raw_outputs["report_kg_responses"] = [x.raw_response for x in report_kgs_out]
+        close_stage_bar(kg_bar)
 
         if mode == "kg_only":
+            qa_bar = make_stage_bar("QA阶段（跳过）")
+            close_stage_bar(qa_bar)
+            classification_bar = make_stage_bar("分类阶段")
             result.prediction = verify_with_kg_only(
                 client=self.reasoning_client,
                 claim=sample.claim,
@@ -135,6 +280,7 @@ class KGCRAFTPipeline:
                 labels=labels,
                 label_descriptions=label_descriptions,
             )
+            close_stage_bar(classification_bar)
             if self.config.run.debug:
                 LOGGER.debug(
                     "[debug][pipeline] sample_id=%s step=kg_only_verification elapsed=%.3fs prediction=%s",
@@ -167,18 +313,24 @@ class KGCRAFTPipeline:
         else:
             raise ValueError(f"Unsupported mode: {mode!r}")
 
+        qa_total_steps = max(1, len(selected_questions))
+        qa_bar = make_stage_bar("QA阶段", total=qa_total_steps)
         qa_pairs = answer_questions(
             client=self.reasoning_client,
             claim=sample.claim,
             reports=sample.reports,
             questions=selected_questions,
             max_context_chars=self.config.pipeline.max_context_chars_for_answers,
+            progress_callback=lambda: advance_stage_bar(qa_bar),
         )
         summary = summarize_qa_pairs(
             client=self.reasoning_client,
             claim=sample.claim,
             qa_pairs=qa_pairs,
         )
+        close_stage_bar(qa_bar)
+
+        classification_bar = make_stage_bar("分类阶段")
         prediction = verify_claim(
             client=self.reasoning_client,
             claim=sample.claim,
@@ -186,6 +338,7 @@ class KGCRAFTPipeline:
             labels=labels,
             label_descriptions=label_descriptions,
         )
+        close_stage_bar(classification_bar)
 
         result.candidate_questions = candidate_questions
         result.selected_questions = selected_questions
