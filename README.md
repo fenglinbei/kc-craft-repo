@@ -37,7 +37,8 @@ kg_craft_repro/
 │   └── example_input.jsonl
 ├── scripts/
 │   ├── run_pipeline.py
-│   └── evaluate.py
+│   ├── evaluate.py
+│   └── convert_raw_datasets.py
 └── src/kg_craft/
     ├── __init__.py
     ├── api.py
@@ -160,6 +161,30 @@ python scripts/run_pipeline.py \
   --output outputs/example_llm_questions.jsonl
 ```
 
+### 5.5 将 LIAR-RAW / RAWFC 转换为本项目输入格式
+
+把原始数据放到以下目录：
+
+- `data/raw/LIAR-RAW/{train,val,test}.json`
+- `data/raw/RAWFC/{train,val,test}/*.json`
+
+运行转换脚本（内置日志和进度条）：
+
+```bash
+python scripts/convert_raw_datasets.py \
+  --dataset both \
+  --input-root data/raw \
+  --output-dir data/converted
+```
+
+如果你希望 RAWFC 使用 `original_label` 作为输出 `label`，可改成：
+
+```bash
+python scripts/convert_raw_datasets.py \
+  --dataset rawfc \
+  --label-field original_label
+```
+
 ---
 
 ## 6. 评估
@@ -264,7 +289,14 @@ python scripts/evaluate.py \
 
 ---
 
-## 11. 一个最小可复现实验建议
+## 11. 日志与进度条
+
+- `scripts/run_pipeline.py`、`scripts/evaluate.py`、`scripts/convert_raw_datasets.py` 均支持 `--log-level`（`DEBUG/INFO/WARNING/ERROR`）。
+- pipeline 样本处理和数据集转换均提供 `tqdm` 进度条，方便观察任务执行状态。
+
+---
+
+## 12. 一个最小可复现实验建议
 
 你可以先这样跑：
 
@@ -277,7 +309,7 @@ python scripts/evaluate.py \
 
 ---
 
-## 12. 说明
+## 13. 说明
 
 本仓库优先保证：
 

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import logging
 from typing import List
+
+from tqdm import tqdm
 
 from .api import OpenAICompatibleChatClient
 from .config import AppConfig
@@ -18,6 +21,8 @@ from .prompts import format_kg_as_text
 from .schemas import PipelineResult, Sample
 from .utils import join_reports, truncate_text
 from .verification import verify_claim, verify_naive, verify_with_kg_only
+
+LOGGER = logging.getLogger(__name__)
 
 
 class KGCRAFTPipeline:
@@ -49,12 +54,16 @@ class KGCRAFTPipeline:
     def run(self, samples: List[Sample], mode: str | None = None) -> List[PipelineResult]:
         mode = mode or self.config.run.mode
         results: List[PipelineResult] = []
-        for sample in samples[: self.config.run.limit]:
+        scoped_samples = samples[: self.config.run.limit]
+        LOGGER.info("Pipeline started. mode=%s, samples=%d", mode, len(scoped_samples))
+        for sample in tqdm(scoped_samples, desc=f"KG-CRAFT ({mode})", unit="sample"):
             results.append(self.run_one(sample, mode=mode))
+        LOGGER.info("Pipeline finished. mode=%s, results=%d", mode, len(results))
         return results
 
     def run_one(self, sample: Sample, mode: str | None = None) -> PipelineResult:
         mode = mode or self.config.run.mode
+        LOGGER.debug("Processing sample_id=%s mode=%s", sample.sample_id, mode)
         labels = self.config.verification.labels
         label_descriptions = self.config.verification.label_descriptions
 
