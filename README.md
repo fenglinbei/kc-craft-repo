@@ -120,8 +120,35 @@ export REASONING_MODEL="gpt-4o"
 
 ---
 
+### 4.1 可选：W&B 实时指标上报
 
-### 4.1 本地离线 vLLM 模式（可选）
+项目支持把**sample 级进度**、**sample 时延**、**运行中动态指标**和**最终指标**上传到 W&B。  
+其中运行中动态指标会在每个 sample 处理完成时上报一次（即每一跳一次）。
+
+1) 安装依赖：
+
+```bash
+pip install wandb
+```
+
+2) 在配置中开启（`configs/base.yaml`）：
+
+```yaml
+wandb:
+  enabled: true
+  project: your-project
+  entity: your-team-or-null
+  name: run-name-or-null
+  group: experiment-group-or-null
+  job_type: pipeline
+  tags: ["kg-craft", "ablation"]
+  mode: null
+```
+
+---
+
+
+### 4.2 本地离线 vLLM 模式（可选）
 
 项目已支持 `backend: local_vllm`，会在进程内直接加载 vLLM，并在 `batch_size > 1` 时通过 `LLM.generate([prompt1, prompt2, ...], sampling_params)` 做批量推理加速。
 
