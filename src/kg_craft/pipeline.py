@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import importlib
 import logging
 from pathlib import Path
 import time
@@ -28,6 +29,56 @@ from .utils import join_reports, truncate_text
 from .verification import verify_claim, verify_naive, verify_with_kg_only
 
 LOGGER = logging.getLogger(__name__)
+
+
+class WandbTracker:
+    def __init__(self, wandb_config: dict[str, Any], run_config: dict[str, Any], data_config: dict[str, Any]):
+        self._enabled = bool(wandb_config.get("enabled", False))
+        self._run = None
+        self._step = 0
+        self._wandb = None
+        if not self._enabled:
+            return
+        try:
+            self._wandb = importlib.import_module("wandb")
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("W&B enabled in config but import failed, skip logging: %s", exc)
+            self._enabled = False
+            return
+
+        init_kwargs: dict[str, Any] = {
+            "project": wandb_config.get("project", "kg-craft"),
+            "entity": wandb_config.get("entity"),
+            "name": wandb_config.get("name"),
+            "group": wandb_config.get("group"),
+            "job_type": wandb_config.get("job_type", "pipeline"),
+            "tags": wandb_config.get("tags"),
+            "mode": wandb_config.get("mode"),
+            "config": {
+                "run": run_config,
+                "data": data_config,
+            },
+        }
+        init_kwargs = {k: v for k, v in init_kwargs.items() if v is not None}
+        self._run = self._wandb.init(**init_kwargs)
+        LOGGER.info("Initialized W&B run. project=%s", init_kwargs.get("project"))
+
+    @property
+    def enabled(self) -> bool:
+        return self._enabled and self._run is not None
+
+    def log(self, payload: dict[str, Any], step: int | None = None) -> None:
+        if not self.enabled:
+            return
+        if step is None:
+            self._step += 1
+            step = self._step
+        self._wandb.log(payload, step=step)
+
+    def finish(self) -> None:
+        if not self.enabled:
+            return
+        self._run.finish()
 
 
 class KGCRAFTPipeline:
@@ -66,6 +117,12 @@ class KGCRAFTPipeline:
             batch_size=config.embedding.batch_size,
             normalize=config.embedding.normalize,
         )
+        wandb_cfg = config.extras.get("wandb", {}) if isinstance(config.extras, dict) else {}
+        self.wandb = WandbTracker(
+            wandb_config=wandb_cfg if isinstance(wandb_cfg, dict) else {},
+            run_config=asdict(config.run),
+            data_config=asdict(config.data),
+        )
 
     def run(self, samples: List[Sample], mode: str | None = None) -> List[PipelineResult]:
         mode = mode or self.config.run.mode
@@ -86,36 +143,49 @@ class KGCRAFTPipeline:
         if show_overall_progress:
             progress_bar = tqdm(total=total_samples, desc=f"KG-CRAFT ({mode})", unit="sample")
 
-        if num_workers == 1:
-            results: List[PipelineResult] = []
-            for batch_start in range(0, total_samples, batch_size):
-                batch = scoped_samples[batch_start : batch_start + batch_size]
-                batch_results = self.run_batch(batch, mode=mode)
-                for sample, result in zip(batch, batch_results):
-                    results.append(result)
-                    self._log_running_metrics(results, sample_id=sample.sample_id, progress_bar=progress_bar)
-        else:
-            indexed_results: list[tuple[int, PipelineResult]] = []
-            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        results: List[PipelineResult] = []
+        try:
+            if num_workers == 1:
                 for batch_start in range(0, total_samples, batch_size):
-                    batch_items = list(enumerate(scoped_samples[batch_start : batch_start + batch_size], start=batch_start))
-                    futures = {
-                        executor.submit(self.run_one, sample, mode): idx
-                        for idx, sample in batch_items
-                    }
-                    for future in as_completed(futures):
-                        idx = futures[future]
-                        result = future.result()
-                        indexed_results.append((idx, result))
+                    batch = scoped_samples[batch_start : batch_start + batch_size]
+                    batch_started = time.perf_counter()
+                    batch_results = self.run_batch(batch, mode=mode)
+                    batch_elapsed = time.perf_counter() - batch_started
+                    avg_batch_sample_latency = batch_elapsed / max(1, len(batch_results))
+                    for sample, result in zip(batch, batch_results):
+                        result.meta.setdefault("processing_latency_seconds", avg_batch_sample_latency)
+                        results.append(result)
                         self._log_running_metrics(
-                            [x[1] for x in indexed_results],
-                            sample_id=result.sample_id,
+                            results,
+                            sample_id=sample.sample_id,
                             progress_bar=progress_bar,
+                            total_samples=total_samples,
                         )
-            results = [result for _, result in sorted(indexed_results, key=lambda item: item[0])]
-        if progress_bar is not None:
-            progress_bar.close()
-        self._log_final_metrics(results)
+            else:
+                indexed_results: list[tuple[int, PipelineResult]] = []
+                with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                    for batch_start in range(0, total_samples, batch_size):
+                        batch_items = list(enumerate(scoped_samples[batch_start : batch_start + batch_size], start=batch_start))
+                        futures = {
+                            executor.submit(self.run_one, sample, mode): idx
+                            for idx, sample in batch_items
+                        }
+                        for future in as_completed(futures):
+                            idx = futures[future]
+                            result = future.result()
+                            indexed_results.append((idx, result))
+                            self._log_running_metrics(
+                                [x[1] for x in indexed_results],
+                                sample_id=result.sample_id,
+                                progress_bar=progress_bar,
+                                total_samples=total_samples,
+                            )
+                results = [result for _, result in sorted(indexed_results, key=lambda item: item[0])]
+            self._log_final_metrics(results)
+        finally:
+            if progress_bar is not None:
+                progress_bar.close()
+            self.wandb.finish()
         LOGGER.info("Pipeline finished. mode=%s, results=%d", mode, len(results))
         return results
 
@@ -224,8 +294,17 @@ class KGCRAFTPipeline:
             f"{metrics['macro_recall']:.4f}/{metrics['macro_f1']:.4f}, n={n}"
         )
 
-    def _log_running_metrics(self, results: List[PipelineResult], sample_id: str, progress_bar: tqdm | None = None) -> None:
+    def _log_running_metrics(
+        self,
+        results: List[PipelineResult],
+        sample_id: str,
+        progress_bar: tqdm | None = None,
+        total_samples: int | None = None,
+    ) -> None:
         y_true, y_pred = self._labeled_pairs(results)
+        completed_samples = len(results)
+        latest_result = next((x for x in reversed(results) if x.sample_id == sample_id), None)
+        latest_latency = None if latest_result is None else latest_result.meta.get("processing_latency_seconds")
         if progress_bar is not None:
             progress_bar.update(1)
         if not y_true:
@@ -235,11 +314,34 @@ class KGCRAFTPipeline:
             )
             if progress_bar is not None:
                 progress_bar.set_postfix_str("running macro P/R/F1 unavailable")
+            self.wandb.log(
+                {
+                    "progress/completed_samples": completed_samples,
+                    "progress/total_samples": total_samples,
+                    "progress/ratio": (completed_samples / total_samples) if total_samples else 0.0,
+                    "latency/sample_seconds": latest_latency,
+                },
+                step=completed_samples,
+            )
             return
         metrics = compute_metrics(y_true, y_pred)
         running_postfix = self._format_running_metrics_postfix(metrics, n=len(y_true))
         if progress_bar is not None:
             progress_bar.set_postfix_str(running_postfix)
+        self.wandb.log(
+            {
+                "progress/completed_samples": completed_samples,
+                "progress/total_samples": total_samples,
+                "progress/ratio": (completed_samples / total_samples) if total_samples else 0.0,
+                "latency/sample_seconds": latest_latency,
+                "metrics/running/macro_precision": metrics.get("macro_precision"),
+                "metrics/running/macro_recall": metrics.get("macro_recall"),
+                "metrics/running/macro_f1": metrics.get("macro_f1"),
+                "metrics/running/accuracy": metrics.get("accuracy"),
+                "metrics/running/labeled_count": len(y_true),
+            },
+            step=completed_samples,
+        )
         # LOGGER.info(
         #     "sample_id=%s classification finished. running macro P/R/F1 = %.4f / %.4f / %.4f (n=%d)",
         #     sample_id,
@@ -289,6 +391,16 @@ class KGCRAFTPipeline:
             LOGGER.info("Final confusion matrix labels: %s", labels)
             for idx, row in enumerate(matrix):
                 LOGGER.info("Final confusion matrix row true=%s: %s", labels[idx], row)
+        self.wandb.log(
+            {
+                "metrics/final/macro_precision": metrics.get("macro_precision"),
+                "metrics/final/macro_recall": metrics.get("macro_recall"),
+                "metrics/final/macro_f1": metrics.get("macro_f1"),
+                "metrics/final/weighted_f1": metrics.get("weighted_f1"),
+                "metrics/final/accuracy": metrics.get("accuracy"),
+                "metrics/final/labeled_count": len(y_true),
+            }
+        )
         self._save_final_metrics_figure(metrics, mode=results[0].mode if results else self.config.run.mode)
 
     def _save_final_metrics_figure(self, metrics: dict[str, Any], mode: str) -> None:
@@ -375,6 +487,7 @@ class KGCRAFTPipeline:
                     time.perf_counter() - sample_started,
                     result.prediction,
                 )
+            result.meta["processing_latency_seconds"] = time.perf_counter() - sample_started
             return result
 
         # Shared KG extraction for full / kg_only / llm_questions
@@ -422,6 +535,7 @@ class KGCRAFTPipeline:
                     time.perf_counter() - sample_started,
                     result.prediction,
                 )
+            result.meta["processing_latency_seconds"] = time.perf_counter() - sample_started
             return result
 
         if mode == "full":
@@ -487,4 +601,5 @@ class KGCRAFTPipeline:
                 len(selected_questions),
                 prediction,
             )
+        result.meta["processing_latency_seconds"] = time.perf_counter() - sample_started
         return result

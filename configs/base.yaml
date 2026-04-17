@@ -96,3 +96,13 @@ verification:
 prompts:
   use_operationalized_kg_prompt: true
   llm_question_examples: []
+
+wandb:
+  enabled: false
+  project: kg-craft
+  entity: null
+  name: null
+  group: null
+  job_type: pipeline
+  tags: []
+  mode: null
