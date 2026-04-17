@@ -10,6 +10,7 @@ from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.patches import FancyArrowPatch
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -76,6 +77,56 @@ def _simplified_nodes_and_triples(sample: dict[str, Any], max_kg_triples: int) -
         node_names = ["(empty KG)"]
     return node_names, triples
 
+
+def _force_layout(node_names: list[str], triples: list[dict[str, Any]], iterations: int = 220) -> dict[str, tuple[float, float]]:
+    """Simple deterministic force-directed layout to avoid the single-ring effect."""
+    if len(node_names) == 1:
+        return {node_names[0]: (0.0, 0.0)}
+
+    rng = np.random.default_rng(42)
+    n = len(node_names)
+    pos = rng.uniform(-1.0, 1.0, size=(n, 2))
+    node_index = {name: idx for idx, name in enumerate(node_names)}
+
+    edges: list[tuple[int, int]] = []
+    for triple in triples:
+        head = str(triple.get("head", "")).strip()
+        tail = str(triple.get("tail", "")).strip()
+        if head in node_index and tail in node_index and head != tail:
+            edges.append((node_index[head], node_index[tail]))
+
+    k = np.sqrt(4.0 / max(1, n))
+    temperature = 0.25
+    for _ in range(iterations):
+        disp = np.zeros_like(pos)
+
+        delta = pos[:, None, :] - pos[None, :, :]
+        dist = np.linalg.norm(delta, axis=2)
+        np.fill_diagonal(dist, 1.0)
+        repulsive_force = (k * k) / np.maximum(dist, 1e-4)
+        disp += (delta / dist[:, :, None] * repulsive_force[:, :, None]).sum(axis=1)
+
+        for u, v in edges:
+            d = pos[u] - pos[v]
+            l = np.linalg.norm(d) + 1e-6
+            attractive = (l * l) / k
+            f = (d / l) * attractive
+            disp[u] -= f
+            disp[v] += f
+
+        norms = np.linalg.norm(disp, axis=1)
+        norms = np.maximum(norms, 1e-9)
+        step = (disp / norms[:, None]) * np.minimum(norms[:, None], temperature)
+        pos += step
+        temperature *= 0.985
+
+    pos = pos - pos.mean(axis=0, keepdims=True)
+    max_abs = np.max(np.abs(pos))
+    if max_abs > 0:
+        pos /= max_abs
+    return {name: (float(pos[idx, 0]), float(pos[idx, 1])) for idx, name in enumerate(node_names)}
+
+
 def _plot_case_overview(
     sample: dict[str, Any],
     output_path: Path,
@@ -127,16 +178,23 @@ def _plot_case_overview(
         )
 
     node_names, triples = _simplified_nodes_and_triples(sample, max_kg_triples=max_kg_triples)
-    n = len(node_names)
-    angles = np.linspace(0, 2 * np.pi, n, endpoint=False)
-    radius = max(1.0, 0.35 * n)
-    pos = {node: (radius * np.cos(a), radius * np.sin(a)) for node, a in zip(node_names, angles)}
+    pos = _force_layout(node_names, triples)
 
     ax_kg.set_title(f"Simplified KG (top {max(1, max_kg_triples)} triples)")
     ax_kg.axis("off")
+    ax_kg.set_aspect("equal")
+    edge_pair_counter: Counter[tuple[str, str]] = Counter()
+    edge_pair_seen: Counter[tuple[str, str]] = Counter()
+    for triple in triples:
+        head = str(triple.get("head", "")).strip()
+        tail = str(triple.get("tail", "")).strip()
+        if head in pos and tail in pos:
+            edge_pair_counter[(head, tail)] += 1
+
     for node, (x, y) in pos.items():
-        ax_kg.scatter(x, y, s=650, color="#D7EAFB", edgecolor="#3A7CA5", linewidth=1.2, zorder=3)
+        ax_kg.scatter(x, y, s=740, color="#D7EAFB", edgecolor="#3A7CA5", linewidth=1.2, zorder=3)
         ax_kg.text(x, y, _wrap_text(node, width=16), ha="center", va="center", fontsize=8, zorder=4)
+
     for triple in triples:
         head = str(triple.get("head", "")).strip()
         tail = str(triple.get("tail", "")).strip()
@@ -145,15 +203,54 @@ def _plot_case_overview(
             continue
         x1, y1 = pos[head]
         x2, y2 = pos[tail]
-        ax_kg.annotate(
-            "",
-            xy=(x2, y2),
-            xytext=(x1, y1),
-            arrowprops=dict(arrowstyle="->", color="#666", lw=1.2, alpha=0.8),
+        pair = (head, tail)
+        offset = edge_pair_seen[pair]
+        total = edge_pair_counter[pair]
+        edge_pair_seen[pair] += 1
+        if total <= 1:
+            rad = 0.0
+        else:
+            center = (total - 1) / 2.0
+            rad = (offset - center) * 0.22
+
+        arrow = FancyArrowPatch(
+            posA=(x1, y1),
+            posB=(x2, y2),
+            connectionstyle=f"arc3,rad={rad}",
+            arrowstyle="-|>",
+            mutation_scale=12,
+            lw=1.1,
+            color="#666666",
+            alpha=0.85,
             zorder=2,
+            shrinkA=18,
+            shrinkB=18,
         )
+        ax_kg.add_patch(arrow)
         mx, my = (x1 + x2) / 2, (y1 + y2) / 2
-        ax_kg.text(mx, my, _wrap_text(relation, width=18), fontsize=7, color="#444", ha="center", va="center")
+        if rad != 0:
+            nx, ny = y2 - y1, -(x2 - x1)
+            norm = np.hypot(nx, ny) + 1e-9
+            mx += (nx / norm) * rad * 0.35
+            my += (ny / norm) * rad * 0.35
+        ax_kg.text(
+            mx,
+            my,
+            _wrap_text(relation, width=18),
+            fontsize=7,
+            color="#444",
+            ha="center",
+            va="center",
+            bbox=dict(boxstyle="round,pad=0.2", facecolor="white", edgecolor="none", alpha=0.75),
+            zorder=5,
+        )
+
+    xs = [xy[0] for xy in pos.values()]
+    ys = [xy[1] for xy in pos.values()]
+    if xs and ys:
+        pad = 0.35
+        ax_kg.set_xlim(min(xs) - pad, max(xs) + pad)
+        ax_kg.set_ylim(min(ys) - pad, max(ys) + pad)
 
     qa_pairs = sample.get("qa_pairs") or []
     top5 = qa_pairs[:5]
