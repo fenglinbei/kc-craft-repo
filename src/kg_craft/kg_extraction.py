@@ -4,13 +4,16 @@ from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
 from .api import OpenAICompatibleChatClient
-from .prompts import build_operational_kg_extraction_prompt
+from .prompts import (
+    build_kg_phase_a_prompt,
+    build_kg_phase_b_prompt,
+    build_kg_phase_c_prompt,
+)
 from .schemas import Entity, KnowledgeGraph, Triple
 from .utils import (
     normalize_text, 
     safe_json_loads, 
-    normalize_relation, 
-    near_duplicate_entity
+    normalize_relation,
 )
 
 
@@ -31,23 +34,98 @@ class KGExtractor:
     def extract_batch(self, texts: List[str]) -> List[KGExtractionOutput]:
         if not texts:
             return []
-        prompts = [build_operational_kg_extraction_prompt(text) for text in texts]
-        messages_batch = [[{"role": "user", "content": prompt}] for prompt in prompts]
-        responses = self.client.chat_batch(messages_batch=messages_batch)
-        if len(responses) != len(texts):
-            raise ValueError(
-                f"Batch KG extraction response size mismatch: expected={len(texts)} got={len(responses)}"
-            )
         outputs: List[KGExtractionOutput] = []
-        for text, response in zip(texts, responses):
-            parsed = safe_json_loads(response.content)
-            kg = parse_kg_json(parsed)
-            outputs.append(KGExtractionOutput(kg=kg, raw_text=response.content, raw_response=response.raw))
+        phase_a_payloads = self._run_phase_a(texts)
+        phase_b_payloads = self._run_phase_b(texts, phase_a_payloads)
+        phase_c_payloads, raw_phase_c = self._run_phase_c(texts, phase_b_payloads)
+
+        for idx, text in enumerate(texts):
+            kg = parse_phased_kg_json(
+                phase_b_payload=phase_b_payloads[idx],
+                phase_c_payload=phase_c_payloads[idx],
+            )
+            outputs.append(
+                KGExtractionOutput(
+                    kg=kg,
+                    raw_text=raw_phase_c[idx],
+                    raw_response={
+                        "phase_a": phase_a_payloads[idx],
+                        "phase_b": phase_b_payloads[idx],
+                        "phase_c": phase_c_payloads[idx],
+                    },
+                )
+            )
         return outputs
 
-def parse_kg_json(payload: dict) -> KnowledgeGraph:
-    entities_raw = payload.get("entities", []) or []
-    triples_raw = payload.get("triples", []) or []
+    def _run_phase_a(self, texts: List[str]) -> List[dict]:
+        prompts = [build_kg_phase_a_prompt(text) for text in texts]
+        responses = self._chat_for_prompts(prompts, "A")
+        return [safe_json_loads(response.content) for response in responses]
+
+    def _run_phase_b(self, texts: List[str], phase_a_payloads: List[dict]) -> List[dict]:
+        prompts = []
+        for text, phase_a in zip(texts, phase_a_payloads):
+            mentions = collect_mentions(phase_a)
+            prompts.append(build_kg_phase_b_prompt(text=text, mentions=mentions))
+        responses = self._chat_for_prompts(prompts, "B")
+        return [safe_json_loads(response.content) for response in responses]
+
+    def _run_phase_c(self, texts: List[str], phase_b_payloads: List[dict]) -> Tuple[List[dict], List[str]]:
+        prompts = []
+        for text, phase_b in zip(texts, phase_b_payloads):
+            canonical_entities = collect_canonical_entities(phase_b)
+            prompts.append(build_kg_phase_c_prompt(text=text, canonical_entities=canonical_entities))
+        responses = self._chat_for_prompts(prompts, "C")
+        return [safe_json_loads(response.content) for response in responses], [response.content for response in responses]
+
+    def _chat_for_prompts(self, prompts: List[str], phase: str):
+        messages_batch = [[{"role": "user", "content": prompt}] for prompt in prompts]
+        responses = self.client.chat_batch(messages_batch=messages_batch)
+        if len(responses) != len(prompts):
+            raise ValueError(
+                f"Batch KG extraction phase {phase} response size mismatch: expected={len(prompts)} got={len(responses)}"
+            )
+        return responses
+
+
+def collect_mentions(phase_a_payload: dict) -> List[str]:
+    mentions: List[str] = []
+    seen = set()
+    for item in (phase_a_payload.get("entities", []) or []):
+        if not isinstance(item, dict):
+            continue
+        mention = str(item.get("mention", "")).strip()
+        if not mention:
+            continue
+        key = normalize_text(mention)
+        if key in seen:
+            continue
+        seen.add(key)
+        mentions.append(mention)
+    return mentions
+
+
+def collect_canonical_entities(phase_b_payload: dict) -> List[dict]:
+    entities: List[dict] = []
+    seen = set()
+    for item in (phase_b_payload.get("entities", []) or []):
+        if not isinstance(item, dict):
+            continue
+        canonical_name = str(item.get("canonical_name", "")).strip()
+        etype = str(item.get("type", "Other")).strip() or "Other"
+        if not canonical_name:
+            continue
+        key = (normalize_text(canonical_name), normalize_text(etype))
+        if key in seen:
+            continue
+        seen.add(key)
+        entities.append({"canonical_name": canonical_name, "type": etype})
+    return entities
+
+
+def parse_phased_kg_json(phase_b_payload: dict, phase_c_payload: dict) -> KnowledgeGraph:
+    entities_raw = phase_b_payload.get("entities", []) or []
+    triples_raw = phase_c_payload.get("triples", []) or []
 
     entities: List[Entity] = []
     entity_seen = set()
@@ -95,11 +173,15 @@ def parse_kg_json(payload: dict) -> KnowledgeGraph:
     return KnowledgeGraph(entities=entities, triples=triples)
 
 
+def parse_kg_json(payload: dict) -> KnowledgeGraph:
+    """Backward-compatible parser for single-pass extraction payloads."""
+    return parse_phased_kg_json(phase_b_payload=payload, phase_c_payload=payload)
+
+
 
 def merge_kgs(kgs: List[KnowledgeGraph]) -> KnowledgeGraph:
     type_map: Dict[str, str] = {}
     name_map: Dict[str, str] = {}
-    merged_entities: List[Entity] = []
 
     for kg in kgs:
         for entity in kg.entities:
@@ -107,7 +189,6 @@ def merge_kgs(kgs: List[KnowledgeGraph]) -> KnowledgeGraph:
             if norm not in name_map:
                 name_map[norm] = entity.name
                 type_map[norm] = entity.type
-                merged_entities.append(Entity(name=entity.name, type=entity.type))
             elif type_map.get(norm, "Other") == "Other" and entity.type != "Other":
                 type_map[norm] = entity.type
 
