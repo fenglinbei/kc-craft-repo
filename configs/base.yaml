@@ -98,8 +98,8 @@ prompts:
   llm_question_examples: []
 
 wandb:
-  enabled: false
-  project: kg-craft
+  enabled: true
+  project: kg-craft-repo
   entity: null
   name: null
   group: null
