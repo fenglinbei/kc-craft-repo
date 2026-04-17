@@ -252,25 +252,29 @@ python scripts/evaluate.py \
   - `{pants-fire, false, barely-true} -> false`
   - `{half-true, mostly-true, true} -> true`
 
-### 6.1 bad case 分析与可视化
+### 6.1 case 分析与可视化
 
-可对预测输出文件中的误判样本进行可视化分析，包含：
+支持同时分析“判别错误”和“判别正确”的样本。每个样本会输出一张融合图 `case_overview.png`，包含：
 
-1. KG 抽取图可视化（`kg_graph.png`）
-2. Top-5 QA 可视化（`top5_qa.png`）
-3. 误判标签分布可视化（`mispred_labels.png`）
+1. 简化后的 KG（可通过 `--max-kg-triples` 控制展示三元组数量）
+2. Top-5 QA 对
+3. 正确标签 / 当前预测标签 / 是否正确（正确显示绿色 `✓`，错误显示红色 `✗`）
+
+同时输出整体误判标签分布图 `mispred_labels.png`。
 
 ```bash
 python scripts/analyze_badcase.py \
   --predictions outputs/example_full.jsonl \
   --output-dir outputs/badcase_analysis \
-  --limit 20
+  --wrong-limit 20 \
+  --correct-limit 10
 ```
 
 可选参数：
 
 - `--sample-ids "id1,id2,..."`：仅分析指定样本
 - `--label-field / --pred-field / --id-field`：自定义字段名
+- `--max-kg-triples`：控制融合图中简化 KG 的最大三元组数量
 
 ---
 
