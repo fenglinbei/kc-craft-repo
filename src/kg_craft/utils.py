@@ -4,9 +4,16 @@ import hashlib
 import json
 import logging
 import re
+import unicodedata
 from pathlib import Path
+from difflib import SequenceMatcher
 from typing import Any, Iterable, Iterator, List
 
+_BE_FORMS = {
+    "am": "be", "is": "be", "are": "be", "was": "be", "were": "be",
+    "been": "be", "being": "be",
+}
+_STOPWORDS = {"a", "an", "the"}
 
 def ensure_dir(path: str | Path) -> Path:
     path = Path(path)
@@ -26,10 +33,10 @@ def stable_hash(payload: Any) -> str:
     return hashlib.sha256(dumped.encode("utf-8")).hexdigest()
 
 
-def normalize_text(text: str) -> str:
-    text = text.strip().lower()
-    text = re.sub(r"\s+", " ", text)
-    return text
+# def normalize_text(text: str) -> str:
+#     text = text.strip().lower()
+#     text = re.sub(r"\s+", " ", text)
+#     return text
 
 
 def truncate_text(text: str, max_chars: int) -> str:
@@ -133,3 +140,55 @@ def deduplicate_preserve_order(items: Iterable[str]) -> list[str]:
         seen.add(key)
         result.append(item)
     return result
+
+def canonicalize_surface(text: str) -> str:
+    text = unicodedata.normalize("NFKC", text or "")
+    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)   # JoeBiden -> Joe Biden
+    text = text.replace("_", " ").replace("-", " ")
+    text = re.sub(r"[^A-Za-z0-9\s]", " ", text.lower())
+    toks = []
+    for tok in text.split():
+        if tok in _STOPWORDS:
+            continue
+        tok = _BE_FORMS.get(tok, tok)
+        toks.append(tok)
+
+    # collapse repeated adjacent tokens
+    out = []
+    for tok in toks:
+        if not out or out[-1] != tok:
+            out.append(tok)
+    return " ".join(out)
+
+def normalize_text(text: str) -> str:
+    return canonicalize_surface(text)
+
+def normalize_relation(text: str) -> str:
+    return re.sub(r"\s+", "_", canonicalize_surface(text)).upper()
+
+def token_jaccard(a: str, b: str) -> float:
+    sa, sb = set(canonicalize_surface(a).split()), set(canonicalize_surface(b).split())
+    if not sa and not sb:
+        return 1.0
+    if not sa or not sb:
+        return 0.0
+    return len(sa & sb) / len(sa | sb)
+
+def near_duplicate_entity(a: str, b: str, edit_thres: float = 0.92, jaccard_thres: float = 0.80) -> bool:
+    na, nb = canonicalize_surface(a), canonicalize_surface(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    if token_jaccard(na, nb) >= jaccard_thres:
+        return True
+    if SequenceMatcher(None, na, nb).ratio() >= edit_thres:
+        return True
+    return False
+
+def is_clause_like_entity(text: str) -> bool:
+    toks = canonicalize_surface(text).split()
+    if len(toks) >= 7:
+        return True
+    aux = {"be", "do", "have", "will", "would", "can", "could", "should", "may", "might", "must"}
+    return any(tok in aux for tok in toks)

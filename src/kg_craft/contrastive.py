@@ -14,9 +14,26 @@ from .prompts import (
     build_question_from_triple,
 )
 from .schemas import KnowledgeGraph, QAPair, Triple
-from .utils import deduplicate_preserve_order, join_reports, normalize_text, truncate_text
+from .utils import (
+    deduplicate_preserve_order, 
+    join_reports, 
+    normalize_text, 
+    truncate_text,
+    near_duplicate_entity, 
+    is_clause_like_entity
+)
 
+ALLOWED_TYPES = {
+    "Person", "Organization", "Location", "Event", "Policy",
+    "Law", "Group", "Concept", "Program", "Date"
+}
 
+def is_substitutable(name: str, etype: str) -> bool:
+    if etype not in ALLOWED_TYPES:
+        return False
+    if is_clause_like_entity(name):
+        return False
+    return True
 
 def cosine_similarity_matrix(embeddings: np.ndarray) -> np.ndarray:
     if embeddings.size == 0:
@@ -42,8 +59,19 @@ def generate_candidate_questions_from_kg(
         head_type = type_map.get(normalize_text(triple.head), "Other")
         tail_type = type_map.get(normalize_text(triple.tail), "Other")
 
-        head_alts = [x for x in entities_by_type.get(head_type, []) if normalize_text(x) != normalize_text(triple.head)]
-        tail_alts = [x for x in entities_by_type.get(tail_type, []) if normalize_text(x) != normalize_text(triple.tail)]
+        if not is_substitutable(triple.head, head_type):
+            continue
+        if not is_substitutable(triple.tail, tail_type):
+            continue
+
+        head_alts = [
+            x for x in entities_by_type.get(head_type, [])
+            if not near_duplicate_entity(x, triple.head) and is_substitutable(x, head_type)
+        ]
+        tail_alts = [
+            x for x in entities_by_type.get(tail_type, [])
+            if not near_duplicate_entity(x, triple.tail) and is_substitutable(x, tail_type)
+        ]
 
         for alt_head in head_alts:
             questions.append(build_question_from_triple(triple, alt_head, replace="head"))

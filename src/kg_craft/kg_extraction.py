@@ -6,7 +6,12 @@ from typing import Dict, List, Tuple
 from .api import OpenAICompatibleChatClient
 from .prompts import build_operational_kg_extraction_prompt
 from .schemas import Entity, KnowledgeGraph, Triple
-from .utils import normalize_text, safe_json_loads
+from .utils import (
+    normalize_text, 
+    safe_json_loads, 
+    normalize_relation, 
+    near_duplicate_entity
+)
 
 
 @dataclass
@@ -49,10 +54,11 @@ def parse_kg_json(payload: dict) -> KnowledgeGraph:
     for item in entities_raw:
         if not isinstance(item, dict):
             continue
-        name = str(item.get("name", "")).strip()
+        name = str(item.get("canonical_name") or item.get("name", "")).strip()
         etype = str(item.get("type", "Other")).strip() or "Other"
         if not name:
             continue
+
         key = (normalize_text(name), normalize_text(etype))
         if key in entity_seen:
             continue
@@ -65,15 +71,16 @@ def parse_kg_json(payload: dict) -> KnowledgeGraph:
         if not isinstance(item, dict):
             continue
         head = str(item.get("head", "")).strip()
-        relation = str(item.get("relation", "")).strip()
+        relation = normalize_relation(str(item.get("relation", "")).strip())
         tail = str(item.get("tail", "")).strip()
         if not head or not relation or not tail:
             continue
-        triple = Triple(head=head, relation=relation, tail=tail)
-        if triple in triple_seen:
+
+        key = (normalize_text(head), relation, normalize_text(tail))
+        if key in triple_seen:
             continue
-        triple_seen.add(triple)
-        triples.append(triple)
+        triple_seen.add(key)
+        triples.append(Triple(head=head, relation=relation, tail=tail))
 
     # Make sure every triple endpoint exists in entities.
     known_entity_names = {normalize_text(e.name): e.type for e in entities}
