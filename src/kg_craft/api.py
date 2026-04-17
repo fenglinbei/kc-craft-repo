@@ -157,7 +157,7 @@ class OpenAICompatibleChatClient:
     def _local_generate(self, prompts: List[str], extra_body: Optional[Dict[str, Any]] = None) -> List[str]:
         assert self._local_llm is not None
         sampling_params = self._build_local_sampling_params(extra_body=extra_body)
-        outputs = self._local_llm.generate(prompts, sampling_params, use_tqdm=False)
+        outputs = self._local_llm.generate(prompts, sampling_params)
         return [output.outputs[0].text if output.outputs else "" for output in outputs]
 
     def _url(self) -> str:
