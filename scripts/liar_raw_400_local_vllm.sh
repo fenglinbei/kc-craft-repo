@@ -13,5 +13,5 @@ export NCCL_P2P_LEVEL=LOC
 python scripts/run_pipeline.py \
   --config configs/liar_raw_local_vllm.yaml  \
   --mode full \
-  --input data/liar_raw_400_test.jsonl \
+  --input data/liar_raw_mini/liar_raw_400_test.jsonl \
   --output outputs/liar_raw_400_test_output.jsonl
