@@ -248,6 +248,29 @@ python scripts/evaluate.py \
 - macro precision / recall / f1
 - weighted precision / recall / f1
 - 每个标签的 classification report
+- 如果标签属于 LIAR 六分类，还会额外输出 `binary_metrics_6to2`：
+  - `{pants-fire, false, barely-true} -> false`
+  - `{half-true, mostly-true, true} -> true`
+
+### 6.1 bad case 分析与可视化
+
+可对预测输出文件中的误判样本进行可视化分析，包含：
+
+1. KG 抽取图可视化（`kg_graph.png`）
+2. Top-5 QA 可视化（`top5_qa.png`）
+3. 误判标签分布可视化（`mispred_labels.png`）
+
+```bash
+python scripts/analyze_badcase.py \
+  --predictions outputs/example_full.jsonl \
+  --output-dir outputs/badcase_analysis \
+  --limit 20
+```
+
+可选参数：
+
+- `--sample-ids "id1,id2,..."`：仅分析指定样本
+- `--label-field / --pred-field / --id-field`：自定义字段名
 
 ---
 

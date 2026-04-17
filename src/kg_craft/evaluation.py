@@ -5,9 +5,37 @@ from typing import Any, Dict, List, Sequence
 
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, precision_recall_fscore_support
 
+SIX_TO_BINARY_LABEL_MAP = {
+    "pants-fire": "false",
+    "false": "false",
+    "barely-true": "false",
+    "half-true": "true",
+    "mostly-true": "true",
+    "true": "true",
+}
 
 
-def compute_metrics(y_true: List[str], y_pred: List[str]) -> Dict[str, Any]:
+def _normalize_label(label: str) -> str:
+    return str(label).strip().lower()
+
+
+def map_six_way_labels_to_binary(labels: Sequence[str]) -> List[str]:
+    mapped: List[str] = []
+    unsupported = set()
+    for label in labels:
+        normalized = _normalize_label(label)
+        if normalized not in SIX_TO_BINARY_LABEL_MAP:
+            unsupported.add(str(label))
+            continue
+        mapped.append(SIX_TO_BINARY_LABEL_MAP[normalized])
+    if unsupported:
+        unsupported_text = ", ".join(sorted(unsupported))
+        raise ValueError(f"Unsupported labels for 6->2 mapping: {unsupported_text}")
+    return mapped
+
+
+
+def compute_metrics(y_true: List[str], y_pred: List[str], include_binary_mapping: bool = True) -> Dict[str, Any]:
     if len(y_true) != len(y_pred):
         raise ValueError("y_true and y_pred must have the same length")
 
@@ -25,7 +53,7 @@ def compute_metrics(y_true: List[str], y_pred: List[str]) -> Dict[str, Any]:
         zero_division=0,
     )
 
-    return {
+    metrics = {
         "accuracy": accuracy_score(y_true, y_pred),
         "macro_precision": macro_p,
         "macro_recall": macro_r,
@@ -37,6 +65,18 @@ def compute_metrics(y_true: List[str], y_pred: List[str]) -> Dict[str, Any]:
         "labels": labels,
         "confusion_matrix": confusion_matrix(y_true, y_pred, labels=labels).tolist(),
     }
+    if include_binary_mapping and y_true and y_pred:
+        try:
+            y_true_binary = map_six_way_labels_to_binary(y_true)
+            y_pred_binary = map_six_way_labels_to_binary(y_pred)
+            metrics["binary_metrics_6to2"] = {
+                "mapping": dict(SIX_TO_BINARY_LABEL_MAP),
+                "metrics": compute_metrics(y_true_binary, y_pred_binary, include_binary_mapping=False),
+            }
+        except ValueError:
+            # Not all labels belong to the 6-way LIAR label set; skip binary metrics.
+            pass
+    return metrics
 
 
 def save_metrics_figure(metrics: Dict[str, Any], output_path: str | Path, title: str = "Final Metrics") -> Path:
