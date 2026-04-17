@@ -140,46 +140,136 @@ additional text or utterances.
 
 
 
-def build_operational_kg_extraction_prompt(text: str) -> str:
-    """A runnable operationalization of Appendix D.1.
+def build_kg_phase_a_prompt(text: str) -> str:
+    """Phase A prompt: mention discovery only (few-shot)."""
+    return f"""You are a top-tier algorithm for extracting entities from text to build a knowledge graph.
 
-    The paper PDF exposes a shortened template with elided details. This prompt keeps
-    the same three phases but makes the output machine-readable JSON.
-    """
-    return f"""You are a top-tier algorithm designed for extracting information in structured formats to build a knowledge graph.
+Phase A goal:
+- Extract mention-level entities only.
+- Do not output triples.
+- Keep surface mentions as they appear in text; do not canonicalize yet.
 
-Knowledge graphs consist of a set of triples. Each triple contains two entities (subject and object) and one relation that connects these subject and object.
+Few-shot example:
+Input text:
+JoeBiden discussed an economic stimulus package for the American people. Joe Biden said it would reduce costs.
 
-Try to capture as much information from the text as possible without sacrificing accuracy. Do not add any information that is not explicitly mentioned in the text.
-
-This is the process to extract information and build a knowledge graph:
-1. Extract nodes:
-- Identify salient entities, concepts, organizations, people, locations, dates, events, or named objects explicitly mentioned in the text.
-- Keep node names short, faithful, and canonical when possible.
-2. Label nodes:
-- Assign one concise semantic type to each node, such as Person, Organization, Location, Event, Date, Policy, Product, Concept, Claim, or Other.
-3. Extract relationships:
-- Create triples (head, relation, tail) only when the relation is clearly supported by the text.
-- Use short relation phrases in uppercase snake case or uppercase words when possible, such as WORKS_FOR, LOCATED_IN, ANNOUNCED, PAID, PART_OF.
-
-Compliance criteria:
-- Do not invent facts.
-- Do not include duplicate entities or duplicate triples.
-- Every triple head and tail must appear in the entities list.
-- If the text is too vague, return fewer triples rather than hallucinating.
-- Return valid JSON only. Do not include markdown fences or any explanatory text.
-
-Return exactly this JSON schema:
+Output JSON:
 {{
   "entities": [
-    {{"name": "entity name", "type": "entity type"}}
-  ],
-  "triples": [
-    {{"head": "entity name", "relation": "RELATION", "tail": "entity name"}}
+    {{"mention": "JoeBiden"}},
+    {{"mention": "economic stimulus package"}},
+    {{"mention": "American people"}},
+    {{"mention": "Joe Biden"}}
   ]
 }}
 
-Text: {text}"""
+Rules:
+- Include salient people, organizations, places, events, objects, policies, or concepts explicitly mentioned.
+- Remove duplicates only if the exact mention string repeats.
+- Return valid JSON only.
+- Schema must be:
+{{
+  "entities": [
+    {{"mention": "string"}}
+  ]
+}}
+
+Input text:
+{text}"""
+
+
+def build_kg_phase_b_prompt(text: str, mentions: List[str]) -> str:
+    """Phase B prompt: mention typing + canonicalization (few-shot)."""
+    mention_lines = "\n".join(f"- {m}" for m in mentions) if mentions else "- (none)"
+    return f"""You are a top-tier algorithm for entity disambiguation and typing in knowledge graph construction.
+
+Phase B goal:
+- Given the text and extracted mentions, map each mention to:
+  1) canonical_name
+  2) semantic type
+
+Few-shot example:
+Input text:
+JoeBiden discussed an economic stimulus package for the American people. Joe Biden said it would reduce costs.
+Mentions:
+- JoeBiden
+- Joe Biden
+- American people
+- economic stimulus package
+
+Output JSON:
+{{
+  "entities": [
+    {{"mention": "JoeBiden", "canonical_name": "Joe Biden", "type": "Person"}},
+    {{"mention": "Joe Biden", "canonical_name": "Joe Biden", "type": "Person"}},
+    {{"mention": "American people", "canonical_name": "American people", "type": "Group"}},
+    {{"mention": "economic stimulus package", "canonical_name": "economic stimulus package", "type": "Policy"}}
+  ]
+}}
+
+Rules:
+- Every input mention must appear exactly once in output.
+- canonical_name must be concise and consistent across aliases.
+- type should be one of: Person, Organization, Location, Event, Date, Policy, Product, Group, Concept, Claim, Other.
+- Do not add mentions that are not in the list.
+- Return valid JSON only.
+
+Input text:
+{text}
+
+Mentions:
+{mention_lines}"""
+
+
+def build_kg_phase_c_prompt(text: str, canonical_entities: List[dict]) -> str:
+    """Phase C prompt: relation extraction constrained to canonical entities."""
+    if canonical_entities:
+        entity_lines = "\n".join(
+            f"- {item.get('canonical_name', '')} [{item.get('type', 'Other')}]"
+            for item in canonical_entities
+        )
+    else:
+        entity_lines = "- (none)"
+
+    return f"""You are a top-tier algorithm for extracting relationships for knowledge graphs.
+
+Phase C goal:
+- Extract relation triples supported by the text.
+- You may only use canonical entity names from the provided entity list as triple head/tail.
+
+Few-shot example:
+Input text:
+JoeBiden discussed an economic stimulus package for the American people. Joe Biden said it would reduce costs.
+Canonical entities:
+- Joe Biden [Person]
+- economic stimulus package [Policy]
+- American people [Group]
+
+Output JSON:
+{{
+  "triples": [
+    {{"head": "Joe Biden", "relation": "DISCUSSED", "tail": "economic stimulus package"}},
+    {{"head": "American people", "relation": "AFFECTED_BY", "tail": "economic stimulus package"}}
+  ]
+}}
+
+Rules:
+- Use uppercase relation labels (prefer UPPER_SNAKE_CASE).
+- Do not invent facts not explicitly supported.
+- Do not output triples with head/tail outside the provided canonical entities.
+- Do not output duplicate triples.
+- Return valid JSON only with schema:
+{{
+  "triples": [
+    {{"head": "string", "relation": "RELATION", "tail": "string"}}
+  ]
+}}
+
+Input text:
+{text}
+
+Canonical entities:
+{entity_lines}"""
 
 
 
